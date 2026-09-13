@@ -44,9 +44,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: "0.16.0"
+        uses: ./.github/actions/setup-zig
 
       - name: Build Dynamic Library
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
