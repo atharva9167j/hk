@@ -17,6 +17,9 @@ on:
         type: boolean
         default: true
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 jobs:
   build-native-binaries:
     name: Build Native Binaries (${{ matrix.target }})
@@ -43,7 +46,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: master
+          version: "0.16.0"
 
       - name: Build Dynamic Library
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast

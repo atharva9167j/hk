@@ -26,6 +26,7 @@ def _find_native_lib() -> str:
         Path(__file__).resolve().parent.parent.parent / "zig-out" / "bin",
         Path(__file__).resolve().parent.parent.parent / "zig-out" / "lib",
         Path(os.getcwd()) / "zig-out" / "bin",
+        Path(os.getcwd()) / "zig-out" / "lib",
         Path(os.getcwd()),
     ]
     for d in search_dirs:
