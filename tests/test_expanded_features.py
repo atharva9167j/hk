@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+import pytest
 
 import numpy as np
 import torch
@@ -200,9 +201,9 @@ class TestExpandedFeatures(unittest.TestCase):
 
     def test_jax_and_flax_bindings(self):
         """Verify hk.jax and hk.flax array and model serialization/deserialization."""
-        import jax
+        jax = pytest.importorskip("jax")
         import jax.numpy as jnp
-        import flax
+        flax = pytest.importorskip("flax")
         from flax.core import freeze
 
         # JAX arrays

@@ -57,13 +57,16 @@ jobs:
         uses: ./.github/actions/setup-zig
 
       - name: Build HK Native Engine
-        run: zig build -Doptimize=ReleaseFast
+        run: |
+          zig build -Doptimize=ReleaseFast
+          python -c "import shutil, glob, os; [shutil.copy(f, 'python/hk/') for f in glob.glob('zig-out/lib/*') + glob.glob('zig-out/bin/*') if os.path.isfile(f)]"
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install wheel build pytest
-          pip install torch numpy safetensors transformers gguf
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy safetensors transformers gguf
           pip install -e .
 
       - name: Verify HK CLI
