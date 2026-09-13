@@ -72,6 +72,10 @@ pub const HKWriter = struct {
         try self.meta_map.setBool(key, val);
     }
 
+    pub fn addMetadataJson(self: *HKWriter, key: []const u8, val: []const u8) !void {
+        try self.meta_map.setJson(key, val);
+    }
+
     pub fn addTensor(self: *HKWriter, payload: TensorPayload) !void {
         try self.tensors.append(self.allocator, payload);
     }

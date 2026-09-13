@@ -14,7 +14,84 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
 
-    if (std.mem.eql(u8, command, "inspect")) {
+    if (std.mem.eql(u8, command, "run")) {
+        const file_path = it.next() orelse {
+            std.debug.print("Error: Missing file path for 'run'\nUsage: hk run <model.hk> [-p \"prompt\"] [-n 128] [--temp 0.7]\n", .{});
+            return;
+        };
+        var prompt_opt: ?[]const u8 = null;
+        var max_tokens: usize = 128;
+        var params = hk.sampling.SamplingParams{};
+
+        while (it.next()) |flag| {
+            if (std.mem.eql(u8, flag, "-p") or std.mem.eql(u8, flag, "--prompt")) {
+                prompt_opt = it.next();
+            } else if (std.mem.eql(u8, flag, "-n") or std.mem.eql(u8, flag, "--max-tokens")) {
+                const val_str = it.next() orelse break;
+                max_tokens = std.fmt.parseInt(usize, val_str, 10) catch 128;
+            } else if (std.mem.eql(u8, flag, "--temp")) {
+                const val_str = it.next() orelse break;
+                params.temperature = std.fmt.parseFloat(f32, val_str) catch 0.7;
+            } else if (std.mem.eql(u8, flag, "--top-p")) {
+                const val_str = it.next() orelse break;
+                params.top_p = std.fmt.parseFloat(f32, val_str) catch 0.9;
+            } else if (std.mem.eql(u8, flag, "--top-k")) {
+                const val_str = it.next() orelse break;
+                params.top_k = std.fmt.parseInt(usize, val_str, 10) catch 40;
+            } else if (std.mem.eql(u8, flag, "--min-p")) {
+                const val_str = it.next() orelse break;
+                params.min_p = std.fmt.parseFloat(f32, val_str) catch 0.05;
+            } else if (std.mem.eql(u8, flag, "--rep-pen")) {
+                const val_str = it.next() orelse break;
+                params.repetition_penalty = std.fmt.parseFloat(f32, val_str) catch 1.1;
+            }
+        }
+        try cmdRun(file_path, prompt_opt, max_tokens, params, allocator);
+    } else if (std.mem.eql(u8, command, "chat")) {
+        const file_path = it.next() orelse {
+            std.debug.print("Error: Missing file path for 'chat'\nUsage: hk chat <model.hk> [--temp 0.7]\n", .{});
+            return;
+        };
+        var params = hk.sampling.SamplingParams{};
+        while (it.next()) |flag| {
+            if (std.mem.eql(u8, flag, "--temp")) {
+                const val_str = it.next() orelse break;
+                params.temperature = std.fmt.parseFloat(f32, val_str) catch 0.7;
+            }
+        }
+        try cmdChat(file_path, params, allocator);
+    } else if (std.mem.eql(u8, command, "tokenize")) {
+        const file_path = it.next() orelse {
+            std.debug.print("Error: Missing file path for 'tokenize'\nUsage: hk tokenize <model.hk> \"text\"\n", .{});
+            return;
+        };
+        const text = it.next() orelse "Hello world";
+        try cmdTokenize(file_path, text, allocator);
+    } else if (std.mem.eql(u8, command, "detokenize")) {
+        const file_path = it.next() orelse {
+            std.debug.print("Error: Missing file path for 'detokenize'\nUsage: hk detokenize <model.hk> <id1> <id2> ...\n", .{});
+            return;
+        };
+        var id_list: std.ArrayList(u32) = .empty;
+        defer id_list.deinit(allocator);
+        while (it.next()) |arg| {
+            if (std.fmt.parseInt(u32, arg, 10)) |id| {
+                try id_list.append(allocator, id);
+            } else |_| {}
+        }
+        try cmdDetokenize(file_path, id_list.items, allocator);
+    } else if (std.mem.eql(u8, command, "convert-safetensors")) {
+        const in_path = it.next() orelse {
+            std.debug.print("Error: Missing input path for 'convert-safetensors'\nUsage: hk convert-safetensors <model.safetensors> <out.hk> [f32|q4_0|q8_0]\n", .{});
+            return;
+        };
+        const out_path = it.next() orelse {
+            std.debug.print("Error: Missing output path for 'convert-safetensors'\nUsage: hk convert-safetensors <model.safetensors> <out.hk> [f32|q4_0|q8_0]\n", .{});
+            return;
+        };
+        const target_st_str = it.next() orelse "f32";
+        try cmdConvertSafeTensors(in_path, out_path, target_st_str, allocator);
+    } else if (std.mem.eql(u8, command, "inspect")) {
         const file_path = it.next() orelse {
             std.debug.print("Error: Missing file path for 'inspect'\nUsage: hk inspect <model.hk>\n", .{});
             return;
@@ -205,10 +282,15 @@ fn printUsage() void {
         \\Usage: hk <command> [arguments]
         \\
         \\Commands:
+        \\  run            <file.hk> [-p "text"] [-n N]  Standalone native LLM text generation with token streaming
+        \\  chat           <file.hk> [--temp T]          Interactive conversational REPL directly in terminal
+        \\  tokenize       <file.hk> "text"              Tokenize input text using in-container vocabulary
+        \\  detokenize     <file.hk> <id1> <id2> ...     Reconstruct text from token ID sequence
+        \\  convert-safetensors <in.safetensors> <out.hk> Zero-dependency native SafeTensors transcoding
+        \\  convert-gguf   <in.gguf> <out.hk>            Zero-copy bitstream ingestion of GGUF models
         \\  inspect        <file.hk>                     Display header, metadata, and tensor TOC details
         \\  dump           <file.hk>                     Comprehensive binary dumper (hex, headers, alignment)
         \\  hash           <file.hk>                     SHA-256 container and per-tensor verification
-        \\  convert-gguf   <in.gguf> <out.hk>            Zero-copy bitstream ingestion of GGUF models
         \\  export         -f <gguf|safetensors> <in> <out> Export HK model to GGUF v3 or Safetensors
         \\  convert-endian <in.hk> <out.hk>              Convert endianness (Little <-> Big Endian)
         \\  gui            [file.hk]                     Launch visual HK model editor GUI
@@ -1201,5 +1283,249 @@ fn cmdGui(file_path_opt: ?[]const u8, allocator: std.mem.Allocator) !void {
         std.debug.print("Launch GUI   : py -3.12 tools/hk_editor_gui.py\n\n", .{});
     }
 }
+
+fn cmdRun(
+    model_path: []const u8,
+    prompt_opt: ?[]const u8,
+    max_tokens: usize,
+    params: hk.sampling.SamplingParams,
+    allocator: std.mem.Allocator,
+) !void {
+    const prompt = prompt_opt orelse "Hello! Tell me who you are and what you can do.";
+
+    std.debug.print("Loading model: {s}...\n", .{model_path});
+    var reader = hk.HKReader.open(model_path, allocator) catch |err| {
+        std.debug.print("Error opening model: {}\n", .{err});
+        return;
+    };
+    defer reader.deinit();
+
+    var tok = hk.tokenizer.Tokenizer.init(allocator);
+    defer tok.deinit();
+    tok.loadFromMetadata(&reader.metadata_map) catch {};
+
+    std.debug.print("Initializing native inference engine...\n", .{});
+    var engine = hk.inference.TransformerEngine.initFromReader(allocator, &reader) catch |err| {
+        std.debug.print("Error initializing transformer engine: {}\n", .{err});
+        return;
+    };
+    defer engine.deinit();
+    defer allocator.destroy(engine);
+
+    var prompt_tokens: std.ArrayList(u32) = .empty;
+    defer prompt_tokens.deinit(allocator);
+    try tok.encode(prompt, true, false, &prompt_tokens);
+
+    if (prompt_tokens.items.len == 0) {
+        std.debug.print("Error: Prompt produced 0 tokens.\n", .{});
+        return;
+    }
+
+    std.debug.print("Prefilling {} prompt tokens...\n", .{prompt_tokens.items.len});
+
+    var sampler = hk.sampling.Sampler.init(params.seed);
+    var pos: usize = 0;
+    var last_logits: []const f32 = &[_]f32{};
+
+    const io = std.Options.debug_io;
+    const start_time = std.Io.Timestamp.now(io, .awake);
+
+    while (pos < prompt_tokens.items.len) : (pos += 1) {
+        last_logits = engine.forward(prompt_tokens.items[pos], pos);
+    }
+
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(allocator);
+    try history.appendSlice(allocator, prompt_tokens.items);
+
+    std.debug.print("\nResponse:\n", .{});
+
+    var gen_count: usize = 0;
+    while (gen_count < max_tokens) : (gen_count += 1) {
+        if (pos >= engine.config.max_seq_len) break;
+
+        const logits_buf = try allocator.alloc(f32, last_logits.len);
+        defer allocator.free(logits_buf);
+        @memcpy(logits_buf, last_logits);
+
+        const next_token = try sampler.sample(allocator, logits_buf, params, history.items);
+        if (tok.eos_id != null and next_token == tok.eos_id.?) break;
+
+        var token_text: std.ArrayList(u8) = .empty;
+        defer token_text.deinit(allocator);
+        try tok.decode(&.{next_token}, false, &token_text);
+
+        std.debug.print("{s}", .{token_text.items});
+
+        try history.append(allocator, next_token);
+        last_logits = engine.forward(next_token, pos);
+        pos += 1;
+    }
+
+    const end_time = std.Io.Timestamp.now(io, .awake);
+    const duration_ns = end_time.nanoseconds - start_time.nanoseconds;
+    const duration_ms = @max(@divTrunc(duration_ns, 1_000_000), 1);
+    const tok_per_sec = (@as(f64, @floatFromInt(gen_count)) * 1000.0) / @as(f64, @floatFromInt(duration_ms));
+
+    std.debug.print("\n\n[Done: generated {} tokens in {} ms ({d:.2} tok/s)]\n", .{ gen_count, duration_ms, tok_per_sec });
+}
+
+fn cmdChat(
+    model_path: []const u8,
+    params: hk.sampling.SamplingParams,
+    allocator: std.mem.Allocator,
+) !void {
+    std.debug.print("Loading model: {s}...\n", .{model_path});
+    var reader = hk.HKReader.open(model_path, allocator) catch |err| {
+        std.debug.print("Error opening model: {}\n", .{err});
+        return;
+    };
+    defer reader.deinit();
+
+    var tok = hk.tokenizer.Tokenizer.init(allocator);
+    defer tok.deinit();
+    tok.loadFromMetadata(&reader.metadata_map) catch {};
+
+    var engine = hk.inference.TransformerEngine.initFromReader(allocator, &reader) catch |err| {
+        std.debug.print("Error initializing transformer engine: {}\n", .{err});
+        return;
+    };
+    defer engine.deinit();
+    defer allocator.destroy(engine);
+
+    std.debug.print("HK Chat REPL (Interactive Native Zig Transformer Inference)\nType 'exit' or 'quit' to end.\n\n", .{});
+
+    var messages: std.ArrayList(hk.tokenizer.ChatMessage) = .empty;
+    defer {
+        for (messages.items) |m| allocator.free(m.content);
+        messages.deinit(allocator);
+    }
+
+    var sampler = hk.sampling.Sampler.init(params.seed);
+    var pos: usize = 0;
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(allocator);
+
+    const io = std.Options.debug_io;
+    var in_file = std.Io.File.stdin();
+
+    while (true) {
+        std.debug.print(">>> ", .{});
+        var line_buf: [4096]u8 = undefined;
+        var line_len: usize = 0;
+
+        while (line_len < line_buf.len) {
+            var b: [1]u8 = undefined;
+            var s = [_][]u8{&b};
+            const n = in_file.readStreaming(io, &s) catch 0;
+            if (n == 0) break;
+            if (b[0] == '\n') break;
+            if (b[0] != '\r') {
+                line_buf[line_len] = b[0];
+                line_len += 1;
+            }
+        }
+
+        const input_line = std.mem.trim(u8, line_buf[0..line_len], " \t\r\n");
+        if (input_line.len == 0) continue;
+        if (std.mem.eql(u8, input_line, "exit") or std.mem.eql(u8, input_line, "quit")) break;
+
+        const user_content = try allocator.dupe(u8, input_line);
+        try messages.append(allocator, .{ .role = .user, .content = user_content });
+
+        var prompt_str: std.ArrayList(u8) = .empty;
+        defer prompt_str.deinit(allocator);
+        try tok.formatChat(.chatml, messages.items, true, &prompt_str);
+
+        var prompt_tokens: std.ArrayList(u32) = .empty;
+        defer prompt_tokens.deinit(allocator);
+        try tok.encode(prompt_str.items, true, false, &prompt_tokens);
+
+        // Advance through any new prompt tokens
+        var last_logits: []const f32 = &[_]f32{};
+        while (pos < prompt_tokens.items.len) : (pos += 1) {
+            last_logits = engine.forward(prompt_tokens.items[pos], pos);
+        }
+
+        std.debug.print("HK: ", .{});
+        var answer_tokens: std.ArrayList(u8) = .empty;
+        defer answer_tokens.deinit(allocator);
+
+        var gen_count: usize = 0;
+        while (gen_count < 512 and pos < engine.config.max_seq_len) : (gen_count += 1) {
+            const logits_buf = try allocator.alloc(f32, last_logits.len);
+            defer allocator.free(logits_buf);
+            @memcpy(logits_buf, last_logits);
+
+            const next_token = try sampler.sample(allocator, logits_buf, params, history.items);
+            if (tok.eos_id != null and next_token == tok.eos_id.?) break;
+
+            var token_text: std.ArrayList(u8) = .empty;
+            defer token_text.deinit(allocator);
+            try tok.decode(&.{next_token}, false, &token_text);
+
+            std.debug.print("{s}", .{token_text.items});
+            try answer_tokens.appendSlice(allocator, token_text.items);
+
+            try history.append(allocator, next_token);
+            last_logits = engine.forward(next_token, pos);
+            pos += 1;
+        }
+        std.debug.print("\n\n", .{});
+
+        const asst_content = try allocator.dupe(u8, answer_tokens.items);
+        try messages.append(allocator, .{ .role = .assistant, .content = asst_content });
+    }
+}
+
+fn cmdTokenize(model_path: []const u8, text: []const u8, allocator: std.mem.Allocator) !void {
+    var reader = try hk.HKReader.open(model_path, allocator);
+    defer reader.deinit();
+
+    var tok = hk.tokenizer.Tokenizer.init(allocator);
+    defer tok.deinit();
+    try tok.loadFromMetadata(&reader.metadata_map);
+
+    var tokens: std.ArrayList(u32) = .empty;
+    defer tokens.deinit(allocator);
+    try tok.encode(text, true, false, &tokens);
+
+    std.debug.print("Tokenized ({} tokens):\n", .{tokens.items.len});
+    for (tokens.items, 0..) |tid, i| {
+        var tok_str: std.ArrayList(u8) = .empty;
+        defer tok_str.deinit(allocator);
+        try tok.decode(&.{tid}, false, &tok_str);
+        std.debug.print("  [{:3}] ID: {:5} -> \"{s}\"\n", .{ i, tid, tok_str.items });
+    }
+}
+
+fn cmdDetokenize(model_path: []const u8, ids: []const u32, allocator: std.mem.Allocator) !void {
+    var reader = try hk.HKReader.open(model_path, allocator);
+    defer reader.deinit();
+
+    var tok = hk.tokenizer.Tokenizer.init(allocator);
+    defer tok.deinit();
+    try tok.loadFromMetadata(&reader.metadata_map);
+
+    var out_text: std.ArrayList(u8) = .empty;
+    defer out_text.deinit(allocator);
+    try tok.decode(ids, false, &out_text);
+
+    std.debug.print("Decoded text:\n{s}\n", .{out_text.items});
+}
+
+fn cmdConvertSafeTensors(in_path: []const u8, out_path: []const u8, target_st_str: []const u8, allocator: std.mem.Allocator) !void {
+    var st: hk.format.StorageType = .f32;
+    if (std.mem.eql(u8, target_st_str, "q4_0")) {
+        st = .q4_0;
+    } else if (std.mem.eql(u8, target_st_str, "q8_0")) {
+        st = .q8_0;
+    }
+
+    std.debug.print("Transcoding SafeTensors '{s}' -> HK '{s}' (storage={s})...\n", .{ in_path, out_path, @tagName(st) });
+    try hk.safetensors.transcodeSafeTensorsToHK(allocator, in_path, out_path, st);
+    std.debug.print("Transcoding completed successfully.\n", .{});
+}
+
 
 

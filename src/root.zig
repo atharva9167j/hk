@@ -15,6 +15,10 @@ pub const growth = @import("growth.zig");
 pub const sandbox = @import("sandbox.zig");
 pub const expansion = @import("expansion.zig");
 pub const gguf = @import("gguf.zig");
+pub const tokenizer = @import("tokenizer.zig");
+pub const sampling = @import("sampling.zig");
+pub const inference = @import("inference.zig");
+pub const safetensors = @import("safetensors.zig");
 pub const c_api = @import("c_api.zig");
 
 // Re-export key structs

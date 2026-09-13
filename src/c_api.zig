@@ -9,6 +9,10 @@ const sparsity = @import("sparsity.zig");
 const tiling = @import("tiling.zig");
 const tensor_ops_mod = @import("tensor_ops.zig");
 const growth_mod = @import("growth.zig");
+const tokenizer_mod = @import("tokenizer.zig");
+const inference_mod = @import("inference.zig");
+const sampling_mod = @import("sampling.zig");
+const safetensors_mod = @import("safetensors.zig");
 
 pub const hk_reader_t = opaque {};
 
@@ -904,6 +908,15 @@ pub export fn hk_writer_add_metadata_bool(writer_ptr: ?*hk_writer_t, key_c: [*:0
     return 0;
 }
 
+pub export fn hk_writer_add_metadata_json(writer_ptr: ?*hk_writer_t, key_c: [*:0]const u8, val_c: [*:0]const u8) c_int {
+    if (writer_ptr == null) return -1;
+    const wrapper: *WriterWrapper = @ptrCast(@alignCast(writer_ptr));
+    const key = std.mem.sliceTo(key_c, 0);
+    const val = std.mem.sliceTo(val_c, 0);
+    wrapper.writer.addMetadataJson(key, val) catch return -1;
+    return 0;
+}
+
 fn safeStorageType(val: u8) ?format.StorageType {
     inline for (@typeInfo(format.StorageType).@"enum".fields) |f| {
         if (val == f.value) return @enumFromInt(val);
@@ -1069,6 +1082,209 @@ pub export fn hk_gemv_q4_k(W: [*]const u8, x: [*]const f32, bias: ?[*]const f32,
     const bias_slice: ?[]const f32 = if (bias) |b| b[0..m] else null;
     tensor_ops_mod.gemvQ4_K(W[0..w_bytes_len], x[0..k], bias_slice, y[0..m], m, k);
 }
+
+// ---------------------------------------------------------------------------
+// Native Tokenizer C ABI
+// ---------------------------------------------------------------------------
+pub const hk_tokenizer_t = opaque {};
+
+const TokenizerWrapper = struct {
+    tok: tokenizer_mod.Tokenizer,
+    allocator: std.mem.Allocator,
+};
+
+pub export fn hk_tokenizer_load_from_file(file_path_c: [*:0]const u8) ?*hk_tokenizer_t {
+    const path = std.mem.sliceTo(file_path_c, 0);
+    const allocator = std.heap.page_allocator;
+
+    var r = reader_mod.HKReader.open(path, allocator) catch return null;
+    defer r.deinit();
+
+    const wrapper = allocator.create(TokenizerWrapper) catch return null;
+    wrapper.allocator = allocator;
+    wrapper.tok = tokenizer_mod.Tokenizer.init(allocator);
+
+    wrapper.tok.loadFromMetadata(&r.metadata_map) catch {
+        wrapper.tok.deinit();
+        allocator.destroy(wrapper);
+        return null;
+    };
+
+    return @ptrCast(wrapper);
+}
+
+pub export fn hk_tokenizer_free(tok_ptr: ?*hk_tokenizer_t) void {
+    if (tok_ptr == null) return;
+    const wrapper: *TokenizerWrapper = @ptrCast(@alignCast(tok_ptr));
+    wrapper.tok.deinit();
+    wrapper.allocator.destroy(wrapper);
+}
+
+pub export fn hk_tokenizer_get_vocab_size(tok_ptr: ?*const hk_tokenizer_t) u32 {
+    if (tok_ptr == null) return 0;
+    const wrapper: *const TokenizerWrapper = @ptrCast(@alignCast(tok_ptr));
+    return @intCast(wrapper.tok.vocab.items.len);
+}
+
+pub export fn hk_tokenizer_encode(
+    tok_ptr: ?*const hk_tokenizer_t,
+    text_c: [*:0]const u8,
+    add_bos: c_int,
+    add_eos: c_int,
+    out_ids: [*]u32,
+    max_ids: u32,
+) u32 {
+    if (tok_ptr == null) return 0;
+    const wrapper: *const TokenizerWrapper = @ptrCast(@alignCast(tok_ptr));
+    const text = std.mem.sliceTo(text_c, 0);
+
+    var tokens: std.ArrayList(u32) = .empty;
+    defer tokens.deinit(wrapper.allocator);
+
+    wrapper.tok.encode(text, add_bos != 0, add_eos != 0, &tokens) catch return 0;
+
+    const count: u32 = @min(@as(u32, @intCast(tokens.items.len)), max_ids);
+    @memcpy(out_ids[0..count], tokens.items[0..count]);
+    return count;
+}
+
+pub export fn hk_tokenizer_decode(
+    tok_ptr: ?*const hk_tokenizer_t,
+    ids_ptr: [*]const u32,
+    num_ids: u32,
+    skip_special: c_int,
+    out_buf: [*]u8,
+    max_len: u32,
+) u32 {
+    if (tok_ptr == null) return 0;
+    const wrapper: *const TokenizerWrapper = @ptrCast(@alignCast(tok_ptr));
+
+    var text_list: std.ArrayList(u8) = .empty;
+    defer text_list.deinit(wrapper.allocator);
+
+    wrapper.tok.decode(ids_ptr[0..num_ids], skip_special != 0, &text_list) catch return 0;
+
+    const count: u32 = @min(@as(u32, @intCast(text_list.items.len)), max_len);
+    @memcpy(out_buf[0..count], text_list.items[0..count]);
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Native Inference Engine C ABI
+// ---------------------------------------------------------------------------
+pub const hk_engine_t = opaque {};
+
+const EngineWrapper = struct {
+    reader: reader_mod.HKReader,
+    engine: *inference_mod.TransformerEngine,
+    allocator: std.mem.Allocator,
+};
+
+pub export fn hk_engine_load_from_file(file_path_c: [*:0]const u8) ?*hk_engine_t {
+    const path = std.mem.sliceTo(file_path_c, 0);
+    const allocator = std.heap.page_allocator;
+
+    var r = reader_mod.HKReader.open(path, allocator) catch return null;
+
+    const eng = inference_mod.TransformerEngine.initFromReader(allocator, &r) catch {
+        r.deinit();
+        return null;
+    };
+
+    const wrapper = allocator.create(EngineWrapper) catch {
+        eng.deinit();
+        allocator.destroy(eng);
+        r.deinit();
+        return null;
+    };
+
+    wrapper.allocator = allocator;
+    wrapper.reader = r;
+    wrapper.engine = eng;
+
+    return @ptrCast(wrapper);
+}
+
+pub export fn hk_engine_free(engine_ptr: ?*hk_engine_t) void {
+    if (engine_ptr == null) return;
+    const wrapper: *EngineWrapper = @ptrCast(@alignCast(engine_ptr));
+    wrapper.engine.deinit();
+    wrapper.allocator.destroy(wrapper.engine);
+    wrapper.reader.deinit();
+    wrapper.allocator.destroy(wrapper);
+}
+
+pub export fn hk_engine_get_vocab_size(engine_ptr: ?*const hk_engine_t) u32 {
+    if (engine_ptr == null) return 0;
+    const wrapper: *const EngineWrapper = @ptrCast(@alignCast(engine_ptr));
+    return @intCast(wrapper.engine.config.vocab_size);
+}
+
+pub export fn hk_engine_reset_cache(engine_ptr: ?*hk_engine_t) void {
+    if (engine_ptr == null) return;
+    const wrapper: *EngineWrapper = @ptrCast(@alignCast(engine_ptr));
+    wrapper.engine.cache.reset();
+}
+
+pub export fn hk_engine_forward(
+    engine_ptr: ?*hk_engine_t,
+    token: u32,
+    pos: u32,
+    out_logits: [*]f32,
+) c_int {
+    if (engine_ptr == null) return -1;
+    const wrapper: *EngineWrapper = @ptrCast(@alignCast(engine_ptr));
+    const logits = wrapper.engine.forward(token, pos);
+    @memcpy(out_logits[0..logits.len], logits);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Native Sampler C ABI
+// ---------------------------------------------------------------------------
+pub export fn hk_sample_token(
+    logits_ptr: [*]f32,
+    vocab_size: u64,
+    temp: f32,
+    top_k: u32,
+    top_p: f32,
+    min_p: f32,
+    rep_pen: f32,
+    history_ptr: ?[*]const u32,
+    history_len: u32,
+    seed: u64,
+) u32 {
+    const allocator = std.heap.page_allocator;
+    const logits = logits_ptr[0..@intCast(vocab_size)];
+    const history: []const u32 = if (history_ptr) |h| h[0..history_len] else &[_]u32{};
+
+    var sampler = sampling_mod.Sampler.init(seed);
+    return sampler.sample(allocator, logits, .{
+        .temperature = temp,
+        .top_k = top_k,
+        .top_p = top_p,
+        .min_p = min_p,
+        .repetition_penalty = rep_pen,
+    }, history) catch sampling_mod.Sampler.sampleGreedy(logits);
+}
+
+// ---------------------------------------------------------------------------
+// Native SafeTensors Transcoder C ABI
+// ---------------------------------------------------------------------------
+pub export fn hk_convert_safetensors(
+    input_path_c: [*:0]const u8,
+    output_path_c: [*:0]const u8,
+    storage_type_raw: u8,
+) c_int {
+    const allocator = std.heap.page_allocator;
+    const input_path = std.mem.sliceTo(input_path_c, 0);
+    const output_path = std.mem.sliceTo(output_path_c, 0);
+    const target_st = safeStorageType(storage_type_raw) orelse format.StorageType.f32;
+
+    safetensors_mod.transcodeSafeTensorsToHK(allocator, input_path, output_path, target_st) catch return -1;
+    return 0;
+}
+
 
 
 

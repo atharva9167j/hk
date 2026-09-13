@@ -129,7 +129,16 @@ def save_file(
 
         if metadata:
             for k, v in metadata.items():
-                writer.add_metadata_string(str(k), str(v))
+                if isinstance(v, (dict, list)):
+                    writer.add_metadata_json(str(k), json.dumps(v))
+                elif isinstance(v, bool):
+                    writer.add_metadata_bool(str(k), v)
+                elif isinstance(v, int):
+                    writer.add_metadata_int(str(k), v)
+                elif isinstance(v, float):
+                    writer.add_metadata_float(str(k), v)
+                else:
+                    writer.add_metadata_string(str(k), str(v))
         if split_count > 1 and "split_index" not in (metadata or {}):
             writer.add_metadata_int("split_index", split_index)
             writer.add_metadata_int("split_count", split_count)

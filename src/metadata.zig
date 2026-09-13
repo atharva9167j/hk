@@ -153,6 +153,31 @@ pub const MetadataMap = struct {
         return null;
     }
 
+    pub fn getInt(self: *const MetadataMap, key: []const u8) ?i64 {
+        const val = self.get(key) orelse return null;
+        return switch (val) {
+            .val_int64 => |v| v,
+            else => null,
+        };
+    }
+
+    pub fn getFloat(self: *const MetadataMap, key: []const u8) ?f64 {
+        const val = self.get(key) orelse return null;
+        return switch (val) {
+            .val_float64 => |v| v,
+            else => null,
+        };
+    }
+
+    pub fn getString(self: *const MetadataMap, key: []const u8) ?[]const u8 {
+        const val = self.get(key) orelse return null;
+        return switch (val) {
+            .val_string => |v| v,
+            .val_json => |j| j,
+            else => null,
+        };
+    }
+
     /// Serializes metadata map into a byte array
     pub fn serialize(self: *const MetadataMap, writer: *buf.BufferWriter) !void {
         for (self.items.items) |item| {

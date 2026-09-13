@@ -350,6 +350,7 @@ class HKPreTrainedModel(nn.Module):
             config = AutoConfig.from_pretrained(model_file, **kwargs)
 
         model = cls(config, device=target_device)
+        model._model_file = str(model_file)
 
         # Load weights
         if model_file.suffix.lower() == ".safetensors":
@@ -485,6 +486,29 @@ class HKForCausalLM(HKPreTrainedModel):
         top_k: int = 50,
     ) -> torch.Tensor:
         """Greedy / Top-k auto-regressive text generation."""
+        # Fast native Zig execution path if model is an .hk file on CPU
+        model_file = getattr(self, "_model_file", None)
+        if model_file and str(model_file).endswith(".hk") and input_ids.shape[0] == 1 and input_ids.device.type == "cpu":
+            try:
+                from .native import NativeHKEngine, is_native_available
+                if is_native_available():
+                    engine = NativeHKEngine(model_file)
+                    ids_list = input_ids[0].tolist()
+                    last_logits = None
+                    for pos, tid in enumerate(ids_list):
+                        last_logits = engine.forward_step(tid, pos)
+                    pos = len(ids_list)
+                    for _ in range(max_new_tokens):
+                        if last_logits is None:
+                            break
+                        next_tok = int(np.argmax(last_logits))
+                        ids_list.append(next_tok)
+                        last_logits = engine.forward_step(next_tok, pos)
+                        pos += 1
+                    return torch.tensor([ids_list], dtype=input_ids.dtype, device=input_ids.device)
+            except Exception:
+                pass
+
         self.eval()
         curr_ids = input_ids.clone()
         for _ in range(max_new_tokens):

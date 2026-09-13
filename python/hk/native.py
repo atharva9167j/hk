@@ -10,7 +10,7 @@ import struct
 import sys
 import types
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, Union
+from typing import Optional, Tuple, Dict, Any, Union, List
 import numpy as np
 import torch
 
@@ -317,6 +317,10 @@ if _LIB is not None:
     _LIB.hk_writer_add_metadata_bool.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
     _LIB.hk_writer_add_metadata_bool.restype = ctypes.c_int
 
+    if hasattr(_LIB, "hk_writer_add_metadata_json"):
+        _LIB.hk_writer_add_metadata_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+        _LIB.hk_writer_add_metadata_json.restype = ctypes.c_int
+
     _LIB.hk_writer_add_tensor.argtypes = [
         ctypes.c_void_p,
         ctypes.c_char_p,
@@ -445,6 +449,76 @@ if _LIB is not None:
     if hasattr(_LIB, "hk_gemv_q4_k"):
         _LIB.hk_gemv_q4_k.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_uint64, ctypes.c_uint64]
         _LIB.hk_gemv_q4_k.restype = None
+
+    if hasattr(_LIB, "hk_tokenizer_load_from_file"):
+        _LIB.hk_tokenizer_load_from_file.argtypes = [ctypes.c_char_p]
+        _LIB.hk_tokenizer_load_from_file.restype = ctypes.c_void_p
+
+        _LIB.hk_tokenizer_encode.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_uint32,
+        ]
+        _LIB.hk_tokenizer_encode.restype = ctypes.c_uint32
+
+        _LIB.hk_tokenizer_decode.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        ]
+        _LIB.hk_tokenizer_decode.restype = ctypes.c_uint32
+
+        _LIB.hk_tokenizer_get_vocab_size.argtypes = [ctypes.c_void_p]
+        _LIB.hk_tokenizer_get_vocab_size.restype = ctypes.c_uint32
+
+        _LIB.hk_tokenizer_free.argtypes = [ctypes.c_void_p]
+        _LIB.hk_tokenizer_free.restype = None
+
+    if hasattr(_LIB, "hk_engine_load_from_file"):
+        _LIB.hk_engine_load_from_file.argtypes = [ctypes.c_char_p]
+        _LIB.hk_engine_load_from_file.restype = ctypes.c_void_p
+
+        _LIB.hk_engine_forward.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        _LIB.hk_engine_forward.restype = ctypes.c_int
+
+        _LIB.hk_engine_reset_cache.argtypes = [ctypes.c_void_p]
+        _LIB.hk_engine_reset_cache.restype = None
+
+        _LIB.hk_engine_get_vocab_size.argtypes = [ctypes.c_void_p]
+        _LIB.hk_engine_get_vocab_size.restype = ctypes.c_uint32
+
+        _LIB.hk_engine_free.argtypes = [ctypes.c_void_p]
+        _LIB.hk_engine_free.restype = None
+
+    if hasattr(_LIB, "hk_sample_token"):
+        _LIB.hk_sample_token.argtypes = [
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_uint64,
+            ctypes.c_float,
+            ctypes.c_uint32,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_uint32,
+            ctypes.c_uint64,
+        ]
+        _LIB.hk_sample_token.restype = ctypes.c_uint32
+
+    if hasattr(_LIB, "hk_convert_safetensors"):
+        _LIB.hk_convert_safetensors.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
+        _LIB.hk_convert_safetensors.restype = ctypes.c_int
 
 
 def is_native_available() -> bool:
@@ -1101,6 +1175,14 @@ class NativeHKWriter:
         if err != 0:
             raise RuntimeError(f"Failed to add metadata bool {key}")
 
+    def add_metadata_json(self, key: str, value: str):
+        if _LIB is not None and hasattr(_LIB, "hk_writer_add_metadata_json"):
+            err = _LIB.hk_writer_add_metadata_json(self.ptr, key.encode("utf-8"), value.encode("utf-8"))
+            if err != 0:
+                raise RuntimeError(f"Failed to add metadata json {key}")
+        else:
+            self.add_metadata_string(key, value)
+
     def add_tensor(
         self,
         name: str,
@@ -1471,6 +1553,113 @@ def native_gemv_q4_k(W_bytes: bytes, x: np.ndarray, bias: Optional[np.ndarray], 
         )
         return out
     raise RuntimeError("Native Zig GEMV kernel required for Q4_K")
+
+
+class NativeHKTokenizer:
+    """High-performance native BPE and SentencePiece Tokenizer powered by compiled Zig engine."""
+
+    def __init__(self, file_path: Union[str, Path]):
+        if not is_native_available() or not hasattr(_LIB, "hk_tokenizer_load_from_file"):
+            raise RuntimeError("Native HK shared library (libhk) required for NativeHKTokenizer")
+        p = str(file_path).encode("utf-8")
+        self._ptr = _LIB.hk_tokenizer_load_from_file(p)
+        if not self._ptr:
+            raise RuntimeError(f"Failed to load native tokenizer from {file_path}")
+
+    def __del__(self):
+        if hasattr(self, "_ptr") and self._ptr and _LIB is not None:
+            _LIB.hk_tokenizer_free(self._ptr)
+            self._ptr = None
+
+    @property
+    def vocab_size(self) -> int:
+        if not self._ptr:
+            return 0
+        return int(_LIB.hk_tokenizer_get_vocab_size(self._ptr))
+
+    def encode(self, text: str, add_bos: bool = True, add_eos: bool = False) -> List[int]:
+        if not self._ptr:
+            return []
+        text_bytes = text.encode("utf-8")
+        max_ids = max(len(text_bytes) * 2 + 16, 256)
+        out_arr = (ctypes.c_uint32 * max_ids)()
+        count = _LIB.hk_tokenizer_encode(
+            self._ptr,
+            text_bytes,
+            1 if add_bos else 0,
+            1 if add_eos else 0,
+            out_arr,
+            max_ids,
+        )
+        return [int(out_arr[i]) for i in range(count)]
+
+    def decode(self, token_ids: List[int], skip_special_tokens: bool = True) -> str:
+        if not self._ptr or not token_ids:
+            return ""
+        arr = (ctypes.c_uint32 * len(token_ids))(*token_ids)
+        max_len = len(token_ids) * 64 + 256
+        buf = ctypes.create_string_buffer(max_len)
+        written = _LIB.hk_tokenizer_decode(
+            self._ptr,
+            arr,
+            len(token_ids),
+            1 if skip_special_tokens else 0,
+            buf,
+            max_len,
+        )
+        return buf.raw[:written].decode("utf-8", errors="replace")
+
+
+class NativeHKEngine:
+    """High-performance native Transformer Inference Engine powered by compiled Zig engine."""
+
+    def __init__(self, file_path: Union[str, Path]):
+        if not is_native_available() or not hasattr(_LIB, "hk_engine_load_from_file"):
+            raise RuntimeError("Native HK shared library (libhk) required for NativeHKEngine")
+        p = str(file_path).encode("utf-8")
+        self._ptr = _LIB.hk_engine_load_from_file(p)
+        if not self._ptr:
+            raise RuntimeError(f"Failed to load native engine from {file_path}")
+        self._vocab_size = int(_LIB.hk_engine_get_vocab_size(self._ptr))
+
+    def __del__(self):
+        if hasattr(self, "_ptr") and self._ptr and _LIB is not None:
+            _LIB.hk_engine_free(self._ptr)
+            self._ptr = None
+
+    @property
+    def vocab_size(self) -> int:
+        return self._vocab_size
+
+    def reset_cache(self):
+        if self._ptr:
+            _LIB.hk_engine_reset_cache(self._ptr)
+
+    def forward_step(self, token: int, pos: int) -> np.ndarray:
+        if not self._ptr:
+            raise RuntimeError("Engine not loaded")
+        logits = np.empty(self._vocab_size, dtype=np.float32)
+        ret = _LIB.hk_engine_forward(
+            self._ptr,
+            ctypes.c_uint32(token),
+            ctypes.c_uint32(pos),
+            logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+        if ret != 0:
+            raise RuntimeError(f"Engine forward step failed with code {ret}")
+        return logits
+
+
+def convert_safetensors_to_hk(input_path: Union[str, Path], output_path: Union[str, Path], storage_type: int = 0) -> None:
+    """Natively converts a .safetensors model directly into an .hk container via Zig."""
+    if not is_native_available() or not hasattr(_LIB, "hk_convert_safetensors"):
+        raise RuntimeError("Native HK shared library required for convert_safetensors_to_hk")
+    in_b = str(input_path).encode("utf-8")
+    out_b = str(output_path).encode("utf-8")
+    ret = _LIB.hk_convert_safetensors(in_b, out_b, ctypes.c_uint8(storage_type))
+    if ret != 0:
+        raise RuntimeError(f"SafeTensors transcoding failed with exit code {ret}")
+
 
 
 

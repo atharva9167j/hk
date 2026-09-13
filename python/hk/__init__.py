@@ -42,7 +42,12 @@ from .composite import (
     HKWhisperModel,
     HKDistilBertModel,
 )
-from .native import is_native_available
+from .native import (
+    is_native_available,
+    NativeHKTokenizer,
+    NativeHKEngine,
+    convert_safetensors_to_hk,
+)
 from . import format
 from . import quantization
 from . import pruning
