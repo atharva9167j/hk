@@ -28,6 +28,14 @@ from .native import (
     native_quantize_q8_0, native_dequantize_q8_0,
     native_quantize_q5_k, native_dequantize_q5_k,
     native_quantize_q3_k, native_dequantize_q3_k,
+    native_quantize_tensor_q4_0, native_dequantize_tensor_q4_0,
+    native_quantize_tensor_q8_0, native_dequantize_tensor_q8_0,
+    native_quantize_tensor_q4_k, native_dequantize_tensor_q4_k,
+    native_quantize_tensor_q8_k, native_dequantize_tensor_q8_k,
+    native_quantize_tensor_q6_k, native_dequantize_tensor_q6_k,
+    native_quantize_tensor_q5_k, native_dequantize_tensor_q5_k,
+    native_quantize_tensor_q3_k, native_dequantize_tensor_q3_k,
+    native_quantize_tensor_q2_k, native_dequantize_tensor_q2_k,
 )
 
 # 16-point NormalFloat-4 (NF4) quantile lookup table matching Zig implementation
@@ -80,84 +88,19 @@ def make_2_4_sparse(tensor: torch.Tensor) -> Tuple[torch.Tensor, float]:
 
 
 def pack_2_4(sparse_tensor: torch.Tensor) -> bytes:
-    """Packs a 2:4 sparse tensor into Ampere physical hardware format."""
+    """Packs a 2:4 sparse tensor into Ampere physical hardware format using compiled Zig engine."""
     native_bytes = native_pack_2_4(sparse_tensor)
     if native_bytes is not None:
         return native_bytes
-
-    flat = sparse_tensor.detach().cpu().to(torch.float32).flatten()
-    n = flat.numel()
-    pad_len = (4 - (n % 4)) % 4
-    if pad_len > 0:
-        flat = F.pad(flat, (0, pad_len))
-
-    groups = flat.view(-1, 4)
-    num_groups = groups.shape[0]
-    meta_bytes = bytearray((num_groups + 1) // 2)
-    val_list: List[float] = []
-
-    for g_idx in range(num_groups):
-        grp = groups[g_idx]
-        nz = torch.nonzero(grp != 0).flatten()
-        if len(nz) == 2:
-            i0, i1 = int(nz[0].item()), int(nz[1].item())
-            v0, v1 = float(grp[i0].item()), float(grp[i1].item())
-        else:
-            # Fallback if fewer or more than 2 non-zeros
-            _, top2 = torch.topk(grp.abs(), 2)
-            i0, i1 = int(top2[0].item()), int(top2[1].item())
-            if i0 > i1:
-                i0, i1 = i1, i0
-            v0, v1 = float(grp[i0].item()), float(grp[i1].item())
-
-        val_list.extend([v0, v1])
-        nibble = (i0 & 0x3) | ((i1 & 0x3) << 2)
-        byte_pos = g_idx // 2
-        if g_idx % 2 == 0:
-            meta_bytes[byte_pos] = nibble & 0x0F
-        else:
-            meta_bytes[byte_pos] |= (nibble & 0x0F) << 4
-
-    meta_len = len(meta_bytes)
-    val_offset = (meta_len + 3) & ~3
-    padding = b"\x00" * (val_offset - meta_len)
-    val_bytes = struct.pack(f"<{len(val_list)}f", *val_list)
-    return bytes(meta_bytes) + padding + val_bytes
+    raise RuntimeError("Native Zig library required for pack_2_4")
 
 
 def unpack_2_4(packed_data: Union[bytes, bytearray, memoryview], shape: List[int]) -> torch.Tensor:
-    """Unpacks Ampere 2:4 structured sparsity back to dense PyTorch tensor."""
+    """Unpacks Ampere 2:4 structured sparsity back to dense PyTorch tensor using compiled Zig engine."""
     t = native_unpack_2_4(packed_data, tuple(shape))
     if t is not None:
         return t
-
-    raw = bytes(packed_data)
-    total_elements = 1
-    for d in shape:
-        total_elements *= d
-    pad_len = (4 - (total_elements % 4)) % 4
-    n_padded = total_elements + pad_len
-    num_groups = n_padded // 4
-
-    meta_len = (num_groups + 1) // 2
-    val_offset = (meta_len + 3) & ~3
-    meta_bytes = raw[:meta_len]
-    val_bytes = raw[val_offset : val_offset + (n_padded // 2) * 4]
-    vals = struct.unpack(f"<{n_padded // 2}f", val_bytes)
-
-    out = torch.zeros(n_padded, dtype=torch.float32)
-    val_ptr = 0
-    for g_idx in range(num_groups):
-        byte_pos = g_idx // 2
-        b = meta_bytes[byte_pos]
-        nibble = (b & 0x0F) if (g_idx % 2 == 0) else ((b >> 4) & 0x0F)
-        i0 = nibble & 0x3
-        i1 = (nibble >> 2) & 0x3
-        out[g_idx * 4 + i0] = vals[val_ptr]
-        out[g_idx * 4 + i1] = vals[val_ptr + 1]
-        val_ptr += 2
-
-    return out[:total_elements].view(*shape)
+    raise RuntimeError("Native Zig library required for unpack_2_4")
 
 
 def quantize_nf4_dual_mode(
@@ -395,11 +338,7 @@ BLOCK_Q2_K_SIZE = 84
 def quantize_q4_k(tensor: torch.Tensor, imatrix: Optional[np.ndarray] = None) -> bytes:
     """
     Quantizes a float tensor into HK Q4_K format using 256-element super-blocks.
-    Each super-block contains 144 bytes:
-      - d: float16 super-scale
-      - dmin: float16 super-min
-      - scales: 12 bytes packed sub-block scales
-      - qs: 128 bytes (256 4-bit quantized weights)
+    Each super-block contains 144 bytes.
     Optionally applies importance matrix calibration weighting.
     """
     flat = tensor.detach().cpu().to(torch.float32).contiguous().numpy().flatten()
@@ -407,20 +346,9 @@ def quantize_q4_k(tensor: torch.Tensor, imatrix: Optional[np.ndarray] = None) ->
     pad_len = (QK_K - (n % QK_K)) % QK_K
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK_K
-
-    out_bytes = bytearray(num_blocks * BLOCK_Q4_K_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK_K : (b + 1) * QK_K]
-        if imatrix is not None and imatrix.size >= (b + 1) * QK_K:
-            # Apply importance weighting if supplied
-            w_imp = imatrix[b * QK_K : (b + 1) * QK_K]
-            block_slice = block_slice * np.clip(w_imp, 0.1, 10.0)
-        q_bytes = native_quantize_q4_k(block_slice)
-        out_bytes[b * BLOCK_Q4_K_SIZE : (b + 1) * BLOCK_Q4_K_SIZE] = q_bytes
-
-    return bytes(out_bytes)
+    if imatrix is not None and imatrix.size >= flat.size:
+        flat = flat * np.clip(imatrix[:flat.size], 0.1, 10.0)
+    return native_quantize_tensor_q4_k(flat)
 
 
 def dequantize_q4_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
@@ -430,42 +358,20 @@ def dequantize_q4_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK_K - (total_elements % QK_K)) % QK_K
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK_K
-
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q4_K_SIZE : (b + 1) * BLOCK_Q4_K_SIZE]
-        out_arr[b * QK_K : (b + 1) * QK_K] = native_dequantize_q4_k(b_data, QK_K)
-
+    out_arr = native_dequantize_tensor_q4_k(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
-
     return torch.from_numpy(out_arr).view(*shape)
 
 
 def quantize_q8_k(tensor: torch.Tensor) -> bytes:
-    """
-    Quantizes a float tensor into HK Q8_K format using 256-element super-blocks.
-    Each super-block contains 292 bytes:
-      - d: float32 super-scale
-      - qs: 256 int8 quantized values
-      - bsums: 16 int16 sub-block sums for fast dot-product acceleration
-    """
+    """Quantizes a float tensor into HK Q8_K format using 256-element super-blocks (292 bytes)."""
     flat = tensor.detach().cpu().to(torch.float32).contiguous().numpy().flatten()
     n = flat.size
     pad_len = (QK_K - (n % QK_K)) % QK_K
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK_K
-
-    out_bytes = bytearray(num_blocks * BLOCK_Q8_K_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK_K : (b + 1) * QK_K]
-        q_bytes = native_quantize_q8_k(block_slice)
-        out_bytes[b * BLOCK_Q8_K_SIZE : (b + 1) * BLOCK_Q8_K_SIZE] = q_bytes
-
-    return bytes(out_bytes)
+    return native_quantize_tensor_q8_k(flat)
 
 
 def dequantize_q8_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
@@ -475,16 +381,9 @@ def dequantize_q8_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK_K - (total_elements % QK_K)) % QK_K
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK_K
-
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q8_K_SIZE : (b + 1) * BLOCK_Q8_K_SIZE]
-        out_arr[b * QK_K : (b + 1) * QK_K] = native_dequantize_q8_k(b_data, QK_K)
-
+    out_arr = native_dequantize_tensor_q8_k(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
-
     return torch.from_numpy(out_arr).view(*shape)
 
 
@@ -495,16 +394,9 @@ def dequantize_q6_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK_K - (total_elements % QK_K)) % QK_K
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK_K
-
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q6_K_SIZE : (b + 1) * BLOCK_Q6_K_SIZE]
-        out_arr[b * QK_K : (b + 1) * QK_K] = native_dequantize_q6_k(b_data, QK_K)
-
+    out_arr = native_dequantize_tensor_q6_k(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
-
     return torch.from_numpy(out_arr).view(*shape)
 
 
@@ -515,16 +407,9 @@ def dequantize_q2_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK_K - (total_elements % QK_K)) % QK_K
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK_K
-
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q2_K_SIZE : (b + 1) * BLOCK_Q2_K_SIZE]
-        out_arr[b * QK_K : (b + 1) * QK_K] = native_dequantize_q2_k(b_data, QK_K)
-
+    out_arr = native_dequantize_tensor_q2_k(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
-
     return torch.from_numpy(out_arr).view(*shape)
 
 
@@ -535,13 +420,7 @@ def quantize_q6_k(tensor: torch.Tensor) -> bytes:
     pad_len = (QK_K - (n % QK_K)) % QK_K
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK_K
-    out_bytes = bytearray(num_blocks * BLOCK_Q6_K_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK_K : (b + 1) * QK_K]
-        out_bytes[b * BLOCK_Q6_K_SIZE : (b + 1) * BLOCK_Q6_K_SIZE] = native_quantize_q6_k(block_slice)
-    return bytes(out_bytes)
+    return native_quantize_tensor_q6_k(flat)
 
 
 def quantize_q2_k(tensor: torch.Tensor) -> bytes:
@@ -551,13 +430,7 @@ def quantize_q2_k(tensor: torch.Tensor) -> bytes:
     pad_len = (QK_K - (n % QK_K)) % QK_K
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK_K
-    out_bytes = bytearray(num_blocks * BLOCK_Q2_K_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK_K : (b + 1) * QK_K]
-        out_bytes[b * BLOCK_Q2_K_SIZE : (b + 1) * BLOCK_Q2_K_SIZE] = native_quantize_q2_k(block_slice)
-    return bytes(out_bytes)
+    return native_quantize_tensor_q2_k(flat)
 
 
 BLOCK_Q4_0_SIZE = 18
@@ -575,13 +448,7 @@ def quantize_q4_0(tensor: torch.Tensor) -> bytes:
     pad_len = (QK4_0 - (n % QK4_0)) % QK4_0
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK4_0
-    out_bytes = bytearray(num_blocks * BLOCK_Q4_0_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK4_0 : (b + 1) * QK4_0]
-        out_bytes[b * BLOCK_Q4_0_SIZE : (b + 1) * BLOCK_Q4_0_SIZE] = native_quantize_q4_0(block_slice)
-    return bytes(out_bytes)
+    return native_quantize_tensor_q4_0(flat)
 
 
 def dequantize_q4_0(packed_data: bytes, shape: List[int]) -> torch.Tensor:
@@ -591,11 +458,7 @@ def dequantize_q4_0(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK4_0 - (total_elements % QK4_0)) % QK4_0
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK4_0
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q4_0_SIZE : (b + 1) * BLOCK_Q4_0_SIZE]
-        out_arr[b * QK4_0 : (b + 1) * QK4_0] = native_dequantize_q4_0(b_data, QK4_0)
+    out_arr = native_dequantize_tensor_q4_0(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
     return torch.from_numpy(out_arr).view(*shape)
@@ -608,13 +471,7 @@ def quantize_q8_0(tensor: torch.Tensor) -> bytes:
     pad_len = (QK8_0 - (n % QK8_0)) % QK8_0
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK8_0
-    out_bytes = bytearray(num_blocks * BLOCK_Q8_0_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK8_0 : (b + 1) * QK8_0]
-        out_bytes[b * BLOCK_Q8_0_SIZE : (b + 1) * BLOCK_Q8_0_SIZE] = native_quantize_q8_0(block_slice)
-    return bytes(out_bytes)
+    return native_quantize_tensor_q8_0(flat)
 
 
 def dequantize_q8_0(packed_data: bytes, shape: List[int]) -> torch.Tensor:
@@ -624,11 +481,7 @@ def dequantize_q8_0(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK8_0 - (total_elements % QK8_0)) % QK8_0
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK8_0
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q8_0_SIZE : (b + 1) * BLOCK_Q8_0_SIZE]
-        out_arr[b * QK8_0 : (b + 1) * QK8_0] = native_dequantize_q8_0(b_data, QK8_0)
+    out_arr = native_dequantize_tensor_q8_0(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
     return torch.from_numpy(out_arr).view(*shape)
@@ -641,13 +494,7 @@ def quantize_q5_k(tensor: torch.Tensor) -> bytes:
     pad_len = (QK_K - (n % QK_K)) % QK_K
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK_K
-    out_bytes = bytearray(num_blocks * BLOCK_Q5_K_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK_K : (b + 1) * QK_K]
-        out_bytes[b * BLOCK_Q5_K_SIZE : (b + 1) * BLOCK_Q5_K_SIZE] = native_quantize_q5_k(block_slice)
-    return bytes(out_bytes)
+    return native_quantize_tensor_q5_k(flat)
 
 
 def dequantize_q5_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
@@ -657,11 +504,7 @@ def dequantize_q5_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK_K - (total_elements % QK_K)) % QK_K
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK_K
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q5_K_SIZE : (b + 1) * BLOCK_Q5_K_SIZE]
-        out_arr[b * QK_K : (b + 1) * QK_K] = native_dequantize_q5_k(b_data, QK_K)
+    out_arr = native_dequantize_tensor_q5_k(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
     return torch.from_numpy(out_arr).view(*shape)
@@ -674,13 +517,7 @@ def quantize_q3_k(tensor: torch.Tensor) -> bytes:
     pad_len = (QK_K - (n % QK_K)) % QK_K
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-        n = flat.size
-    num_blocks = n // QK_K
-    out_bytes = bytearray(num_blocks * BLOCK_Q3_K_SIZE)
-    for b in range(num_blocks):
-        block_slice = flat[b * QK_K : (b + 1) * QK_K]
-        out_bytes[b * BLOCK_Q3_K_SIZE : (b + 1) * BLOCK_Q3_K_SIZE] = native_quantize_q3_k(block_slice)
-    return bytes(out_bytes)
+    return native_quantize_tensor_q3_k(flat)
 
 
 def dequantize_q3_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
@@ -690,11 +527,7 @@ def dequantize_q3_k(packed_data: bytes, shape: List[int]) -> torch.Tensor:
         total_elements *= d
     pad_len = (QK_K - (total_elements % QK_K)) % QK_K
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // QK_K
-    out_arr = np.empty(n_padded, dtype=np.float32)
-    for b in range(num_blocks):
-        b_data = packed_data[b * BLOCK_Q3_K_SIZE : (b + 1) * BLOCK_Q3_K_SIZE]
-        out_arr[b * QK_K : (b + 1) * QK_K] = native_dequantize_q3_k(b_data, QK_K)
+    out_arr = native_dequantize_tensor_q3_k(packed_data, n_padded)
     if pad_len > 0:
         out_arr = out_arr[:total_elements]
     return torch.from_numpy(out_arr).view(*shape)

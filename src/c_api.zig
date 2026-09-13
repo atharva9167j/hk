@@ -350,6 +350,166 @@ pub export fn hk_dequantize_block_nvfp4(packed_in: [*]const u8, scale_fp8: u8, c
     return 0;
 }
 
+pub export fn hk_quantize_tensor_q4_0(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK4_0 != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK4_0);
+    const blocks: [*]quantization.BlockQ4_0 = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeBlockQ4_0(weights[b * quantization.QK4_0 .. (b + 1) * quantization.QK4_0], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q4_0(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK4_0 != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK4_0);
+    const blocks: [*]const quantization.BlockQ4_0 = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeBlockQ4_0(&blocks[b], quantization.QK4_0, out_f32[b * quantization.QK4_0 .. (b + 1) * quantization.QK4_0]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_q8_0(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK8_0 != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK8_0);
+    const blocks: [*]quantization.BlockQ8_0 = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeBlockQ8_0(weights[b * quantization.QK8_0 .. (b + 1) * quantization.QK8_0], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q8_0(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK8_0 != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK8_0);
+    const blocks: [*]const quantization.BlockQ8_0 = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeBlockQ8_0(&blocks[b], quantization.QK8_0, out_f32[b * quantization.QK8_0 .. (b + 1) * quantization.QK8_0]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_q4_k(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]quantization.BlockQ4_K = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeSuperBlockQ4_K(weights[b * quantization.QK_K .. (b + 1) * quantization.QK_K], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q4_k(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]const quantization.BlockQ4_K = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeSuperBlockQ4_K(&blocks[b], quantization.QK_K, out_f32[b * quantization.QK_K .. (b + 1) * quantization.QK_K]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_q8_k(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]quantization.BlockQ8_K = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeSuperBlockQ8_K(weights[b * quantization.QK_K .. (b + 1) * quantization.QK_K], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q8_k(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]const quantization.BlockQ8_K = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeSuperBlockQ8_K(&blocks[b], quantization.QK_K, out_f32[b * quantization.QK_K .. (b + 1) * quantization.QK_K]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_q6_k(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]quantization.BlockQ6_K = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeSuperBlockQ6_K(weights[b * quantization.QK_K .. (b + 1) * quantization.QK_K], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q6_k(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]const quantization.BlockQ6_K = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeSuperBlockQ6_K(&blocks[b], quantization.QK_K, out_f32[b * quantization.QK_K .. (b + 1) * quantization.QK_K]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_q5_k(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]quantization.BlockQ5_K = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeSuperBlockQ5_K(weights[b * quantization.QK_K .. (b + 1) * quantization.QK_K], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q5_k(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]const quantization.BlockQ5_K = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeSuperBlockQ5_K(&blocks[b], quantization.QK_K, out_f32[b * quantization.QK_K .. (b + 1) * quantization.QK_K]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_q3_k(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]quantization.BlockQ3_K = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeSuperBlockQ3_K(weights[b * quantization.QK_K .. (b + 1) * quantization.QK_K], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q3_k(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]const quantization.BlockQ3_K = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeSuperBlockQ3_K(&blocks[b], quantization.QK_K, out_f32[b * quantization.QK_K .. (b + 1) * quantization.QK_K]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_q2_k(weights: [*]const f32, count: u64, out_bytes: [*]u8) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]quantization.BlockQ2_K = @ptrCast(@alignCast(out_bytes));
+    for (0..num_blocks) |b| {
+        quantization.quantizeSuperBlockQ2_K(weights[b * quantization.QK_K .. (b + 1) * quantization.QK_K], &blocks[b]);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_q2_k(in_bytes: [*]const u8, count: u64, out_f32: [*]f32) c_int {
+    if (count % quantization.QK_K != 0) return -1;
+    const num_blocks: usize = @intCast(count / quantization.QK_K);
+    const blocks: [*]const quantization.BlockQ2_K = @ptrCast(@alignCast(in_bytes));
+    for (0..num_blocks) |b| {
+        quantization.dequantizeSuperBlockQ2_K(&blocks[b], quantization.QK_K, out_f32[b * quantization.QK_K .. (b + 1) * quantization.QK_K]);
+    }
+    return 0;
+}
+
 pub export fn hk_pack_2_4(
     dense_in: [*]const f32,
     count: u64,

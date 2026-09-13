@@ -418,6 +418,24 @@ if _LIB is not None:
         _LIB.hk_dequantize_block_nvfp4.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)]
         _LIB.hk_dequantize_block_nvfp4.restype = ctypes.c_int
 
+    for fn in [
+        "hk_quantize_tensor_q4_0", "hk_dequantize_tensor_q4_0",
+        "hk_quantize_tensor_q8_0", "hk_dequantize_tensor_q8_0",
+        "hk_quantize_tensor_q4_k", "hk_dequantize_tensor_q4_k",
+        "hk_quantize_tensor_q8_k", "hk_dequantize_tensor_q8_k",
+        "hk_quantize_tensor_q6_k", "hk_dequantize_tensor_q6_k",
+        "hk_quantize_tensor_q5_k", "hk_dequantize_tensor_q5_k",
+        "hk_quantize_tensor_q3_k", "hk_dequantize_tensor_q3_k",
+        "hk_quantize_tensor_q2_k", "hk_dequantize_tensor_q2_k",
+    ]:
+        if hasattr(_LIB, fn):
+            func = getattr(_LIB, fn)
+            if "dequantize" in fn:
+                func.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_float)]
+            else:
+                func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_uint64, ctypes.c_char_p]
+            func.restype = ctypes.c_int
+
     if hasattr(_LIB, "hk_convert_gguf"):
         _LIB.hk_convert_gguf.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
         _LIB.hk_convert_gguf.restype = ctypes.c_int
@@ -963,6 +981,230 @@ def native_quantize_q2_k(weights: np.ndarray) -> bytes:
     if err != 0:
         raise RuntimeError(f"Native Q2_K quantization failed: {err}")
     return bytes(buf)
+
+
+def native_quantize_tensor_q4_0(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q4_0 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q4_0"):
+        raise RuntimeError("Native tensor Q4_0 quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 32 == 0
+    num_blocks = n // 32
+    buf = bytearray(num_blocks * 18)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q4_0(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q4_0 quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q4_0(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q4_0 byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q4_0"):
+        raise RuntimeError("Native tensor Q4_0 dequantizer not available")
+    assert count % 32 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q4_0(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q4_0 dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_q8_0(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q8_0 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q8_0"):
+        raise RuntimeError("Native tensor Q8_0 quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 32 == 0
+    num_blocks = n // 32
+    buf = bytearray(num_blocks * 34)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q8_0(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q8_0 quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q8_0(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q8_0 byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q8_0"):
+        raise RuntimeError("Native tensor Q8_0 dequantizer not available")
+    assert count % 32 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q8_0(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q8_0 dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_q4_k(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q4_K using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q4_k"):
+        raise RuntimeError("Native tensor Q4_K quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 256 == 0
+    num_blocks = n // 256
+    buf = bytearray(num_blocks * 144)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q4_k(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q4_K quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q4_k(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q4_K byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q4_k"):
+        raise RuntimeError("Native tensor Q4_K dequantizer not available")
+    assert count % 256 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q4_k(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q4_K dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_q8_k(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q8_K using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q8_k"):
+        raise RuntimeError("Native tensor Q8_K quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 256 == 0
+    num_blocks = n // 256
+    buf = bytearray(num_blocks * 292)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q8_k(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q8_K quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q8_k(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q8_K byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q8_k"):
+        raise RuntimeError("Native tensor Q8_K dequantizer not available")
+    assert count % 256 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q8_k(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q8_K dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_q6_k(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q6_K using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q6_k"):
+        raise RuntimeError("Native tensor Q6_K quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 256 == 0
+    num_blocks = n // 256
+    buf = bytearray(num_blocks * 210)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q6_k(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q6_K quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q6_k(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q6_K byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q6_k"):
+        raise RuntimeError("Native tensor Q6_K dequantizer not available")
+    assert count % 256 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q6_k(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q6_K dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_q5_k(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q5_K using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q5_k"):
+        raise RuntimeError("Native tensor Q5_K quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 256 == 0
+    num_blocks = n // 256
+    buf = bytearray(num_blocks * 176)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q5_k(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q5_K quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q5_k(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q5_K byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q5_k"):
+        raise RuntimeError("Native tensor Q5_K dequantizer not available")
+    assert count % 256 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q5_k(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q5_K dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_q3_k(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q3_K using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q3_k"):
+        raise RuntimeError("Native tensor Q3_K quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 256 == 0
+    num_blocks = n // 256
+    buf = bytearray(num_blocks * 110)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q3_k(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q3_K quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q3_k(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q3_K byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q3_k"):
+        raise RuntimeError("Native tensor Q3_K dequantizer not available")
+    assert count % 256 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q3_k(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q3_K dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_q2_k(weights: np.ndarray) -> bytes:
+    """Batch quantizes a full float32 array to Q2_K using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_q2_k"):
+        raise RuntimeError("Native tensor Q2_K quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % 256 == 0
+    num_blocks = n // 256
+    buf = bytearray(num_blocks * 84)
+    c_buf = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    err = _LIB.hk_quantize_tensor_q2_k(w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), n, ctypes.cast(c_buf, ctypes.c_char_p))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q2_K quantize failed: {err}")
+    return bytes(buf)
+
+
+def native_dequantize_tensor_q2_k(packed_bytes: bytes, count: int) -> np.ndarray:
+    """Batch dequantizes a full Q2_K byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_q2_k"):
+        raise RuntimeError("Native tensor Q2_K dequantizer not available")
+    assert count % 256 == 0
+    out = np.empty(count, dtype=np.float32)
+    err = _LIB.hk_dequantize_tensor_q2_k(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    if err != 0:
+        raise RuntimeError(f"Native tensor Q2_K dequantize failed: {err}")
+    return out
 
 
 def native_net2wider_swiglu(

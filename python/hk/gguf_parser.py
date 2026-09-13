@@ -234,60 +234,12 @@ class GGUFReaderLight:
     def convert_to_hk(self, output_hk_path: str):
         """Transcodes/transplants this GGUF file into an HK model container."""
         from .native import is_native_available, native_convert_gguf
-        if is_native_available():
-            ret = native_convert_gguf(self.file_path, output_hk_path)
-            if ret == 0:
-                return
+        if not is_native_available():
+            raise RuntimeError("Native HK engine (hk.dll / libhk.so) is required for high-performance GGUF transcoding.")
 
-        # Python fallback transplant
-        from .writer import HKWriter
-        from .format import StorageType
-
-        # GGML to HK StorageType mapping
-        ggml_to_hk = {
-            GGML_TYPE_F32: StorageType.F32,
-            GGML_TYPE_F16: StorageType.F16,
-            GGML_TYPE_BF16: StorageType.BF16,
-            GGML_TYPE_Q4_0: StorageType.Q4_0,
-            GGML_TYPE_Q8_0: StorageType.Q8_0,
-            GGML_TYPE_Q4_K: StorageType.Q4_K,
-            GGML_TYPE_Q5_K: StorageType.Q5_K,
-            GGML_TYPE_Q6_K: StorageType.Q6_K,
-            GGML_TYPE_Q8_K: StorageType.Q8_K,
-            GGML_TYPE_Q2_K: StorageType.Q2_K,
-            GGML_TYPE_Q3_K: StorageType.Q3_K,
-            GGML_TYPE_IQ4_NL: StorageType.IQ4_NL,
-        }
-
-        writer = HKWriter()
-        writer.set_alignment(128)
-
-        # Transfer metadata
-        for k, v in self.metadata.items():
-            if isinstance(v, str):
-                writer.add_metadata(k, v)
-            elif isinstance(v, bool):
-                writer.add_metadata(k, v)
-            elif isinstance(v, int):
-                writer.add_metadata(k, v)
-            elif isinstance(v, float):
-                writer.add_metadata(k, v)
-
-        writer.add_metadata("hk.transcoded_from", "gguf")
-        writer.add_metadata("hk.gguf_version", self.version)
-
-        # Transfer tensors
-        for name, desc in self.tensors.items():
-            raw_bytes = self.read_tensor_bytes(name)
-            st = ggml_to_hk.get(desc.ggml_type, StorageType.F32)
-            writer.add_tensor_raw(
-                name=name,
-                shape=desc.shape,
-                storage_type=st,
-                raw_bytes=raw_bytes,
-            )
-
-        writer.write(output_hk_path)
+        ret = native_convert_gguf(self.file_path, output_hk_path)
+        if ret != 0:
+            raise RuntimeError(f"Native GGUF conversion failed with error code: {ret}")
 
 
 def convert_gguf_to_hk(input_gguf: str, output_hk: str):
