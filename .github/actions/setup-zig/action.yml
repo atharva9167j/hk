@@ -24,9 +24,9 @@ runs:
         URL="https://ziglang.org/download/${{ inputs.version }}/zig-${ZIG_ARCH}-linux-${{ inputs.version }}.tar.xz"
         echo "Downloading Zig from $URL"
         curl -fsSL "$URL" -o /tmp/zig.tar.xz
-        mkdir -p /opt/zig
-        tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
-        echo "/opt/zig" >> $GITHUB_PATH
+        mkdir -p "$RUNNER_TEMP/zig"
+        tar -xJf /tmp/zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+        echo "$RUNNER_TEMP/zig" >> $GITHUB_PATH
 
     - name: Install Zig on macOS
       if: runner.os == 'macOS'
@@ -41,9 +41,9 @@ runs:
         URL="https://ziglang.org/download/${{ inputs.version }}/zig-${ZIG_ARCH}-macos-${{ inputs.version }}.tar.xz"
         echo "Downloading Zig from $URL"
         curl -fsSL "$URL" -o /tmp/zig.tar.xz
-        mkdir -p /opt/zig
-        tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
-        echo "/opt/zig" >> $GITHUB_PATH
+        mkdir -p "$RUNNER_TEMP/zig"
+        tar -xJf /tmp/zig.tar.xz -C "$RUNNER_TEMP/zig" --strip-components=1
+        echo "$RUNNER_TEMP/zig" >> $GITHUB_PATH
 
     - name: Install Zig on Windows
       if: runner.os == 'Windows'
