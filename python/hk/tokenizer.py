@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .constants import TokenType, PreTokenizerType
+from .native import is_native_available, NativeHKTokenizer
 
 try:
     import jinja2
@@ -340,6 +341,19 @@ class HKTokenizer:
         return word
 
     def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
+        if getattr(self, "_native_tok", None) is not None:
+            try:
+                if not text:
+                    res = []
+                    if add_special_tokens and self.bos_token_id is not None:
+                        res.append(self.bos_token_id)
+                    if add_special_tokens and self.eos_token_id is not None:
+                        res.append(self.eos_token_id)
+                    return res
+                return self._native_tok.encode(text, add_bos=add_special_tokens, add_eos=add_special_tokens)
+            except Exception:
+                pass
+
         tokens = []
         if add_special_tokens:
             tokens.append(self.bos_token_id)
@@ -378,6 +392,12 @@ class HKTokenizer:
         return tokens
 
     def decode(self, token_ids: List[int], skip_special_tokens: bool = True) -> str:
+        if getattr(self, "_native_tok", None) is not None:
+            try:
+                return self._native_tok.decode(token_ids, skip_special_tokens=skip_special_tokens)
+            except Exception:
+                pass
+
         special_ids = {self.bos_token_id, self.eos_token_id, self.unk_token_id, self.pad_token_id}
         chars = []
         for tid in token_ids:
@@ -775,6 +795,13 @@ class HKTokenizer:
                     setattr(tok, id_attr, int(meta[meta_key]))
                 except Exception:
                     pass
+
+        # Attach native tokenizer if available
+        if is_native_available():
+            try:
+                tok._native_tok = NativeHKTokenizer(hk_path)
+            except Exception:
+                tok._native_tok = None
 
         return tok
 
