@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/harshitkhandelwal208/hk/discussions
+    about: Ask questions, share ideas, and discuss with the community.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/harshitkhandelwal208/hk/security/advisories/new
+    about: Report security vulnerabilities confidentially.

@@ -1,0 +1,42 @@
+{
+  "name": "@hk-format/core",
+  "version": "1.0.0",
+  "description": "TypeScript / JavaScript bindings for the HK neural tensor format and SIMD compute engine.",
+  "type": "module",
+  "main": "dist/hk.js",
+  "types": "dist/hk.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "../../LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harshitkhandelwal208/hk.git",
+    "directory": "bindings/js"
+  },
+  "homepage": "https://github.com/harshitkhandelwal208/hk#readme",
+  "bugs": {
+    "url": "https://github.com/harshitkhandelwal208/hk/issues"
+  },
+  "keywords": [
+    "deep-learning",
+    "tensor",
+    "neural-network",
+    "quantization",
+    "sparsity",
+    "zero-copy",
+    "hk",
+    "gguf",
+    "safetensors"
+  ],
+  "author": "HK AI Research Team",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

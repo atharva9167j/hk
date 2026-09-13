@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use the HK Neural Tensor Framework in your research or production systems, please cite it as below."
+authors:
+  - name: "HK AI Research Team"
+title: "HK: Next-Generation AI Framework featuring Dual-Mode Quantization, Native SIMD Zig Engine, and Adaptive Architecture Growth"
+version: 1.0.0
+date-released: 2026-09-13
+url: "https://github.com/harshitkhandelwal208/hk"
+repository-code: "https://github.com/harshitkhandelwal208/hk"
+license: "Apache-2.0"
+keywords:
+  - deep-learning
+  - quantization
+  - tensor-container
+  - simd
+  - zig
+  - gguf
+  - safetensors
+  - llm-inference

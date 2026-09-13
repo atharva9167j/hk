@@ -1,0 +1,57 @@
+name: Bug Report
+description: Create a report to help us improve HK
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report! Please verify that this issue hasn't already been reported.
+
+  - type: input
+    id: version
+    attributes:
+      label: HK Version
+      description: What version of HK are you using? (Run `hk --version` or check `hk.__version__`)
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating System / Architecture
+      options:
+        - Windows (x86_64)
+        - Linux (x86_64)
+        - Linux (aarch64 / ARM64)
+        - macOS (Apple Silicon / aarch64)
+        - macOS (Intel / x86_64)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps or minimal python/zig code to reproduce the behavior.
+      placeholder: |
+        1. Ingest model `...`
+        2. Run `...`
+        3. See error `...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output or Stack Trace
+      description: Please copy and paste any relevant logs or tracebacks.
+      render: shell

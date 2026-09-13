@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hk"
+version = "1.0.0"
+description = "HK: Next-Generation AI Framework featuring Dual-Mode Quantization, Native SIMD Zig Engine, and Adaptive Architecture Growth."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "HK AI Research Team" }
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.22.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["hk*"]
+
+[tool.setuptools.package-data]
+hk = ["*.dll", "*.so", "*.dylib", "py.typed"]
+
+[project.scripts]
+hk = "hk.cli:main"
+hk-gui = "hk.gui:main"
+
+[project.urls]
+Homepage = "https://github.com/harshitkhandelwal208/hk"
+Documentation = "https://github.com/harshitkhandelwal208/hk#readme"
+Repository = "https://github.com/harshitkhandelwal208/hk.git"
+Issues = "https://github.com/harshitkhandelwal208/hk/issues"
+Changelog = "https://github.com/harshitkhandelwal208/hk/blob/main/CHANGELOG.md"

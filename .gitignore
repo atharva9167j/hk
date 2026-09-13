@@ -1,0 +1,53 @@
+# Zig Build & Cache
+.zig-cache/
+zig-out/
+
+# Python Cache & Packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Rust Bindings
+bindings/rust/target/
+bindings/rust/Cargo.lock
+
+# C# / .NET Bindings
+bindings/csharp/bin/
+bindings/csharp/obj/
+
+# Java Bindings
+*.class
+bindings/java/com/hk/*.class
+
+# JS / TS Bindings
+node_modules/
+bindings/js/node_modules/
+bindings/js/*.js.map
+
+# Temporary Scratch & Diagnostic Files
+scratch/test_*
+benchmarks/test_*
+benchmarks/*.bin
+benchmarks/model_bench*
+models/*.hk
+models/*.safetensors
+models/*.pt
+*.tmp
+
+# Operating System & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.pdb
+*.ilk
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.exe
