@@ -29,6 +29,7 @@ on:
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-native-binaries:
@@ -71,16 +72,16 @@ jobs:
           fi
           if [ -f zig-out/bin/hk.dll ]; then
             cp zig-out/bin/hk.dll zig-out/staged/${{ matrix.artifact_name }}
+            if [ -f zig-out/lib/hk.lib ]; then
+              cp zig-out/lib/hk.lib zig-out/staged/hk.lib
+            fi
           fi
 
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}
-          path: |
-            zig-out/staged/*
-            zig-out/lib/*
-            zig-out/bin/*.dll
+          path: zig-out/staged/*
 
   build-python-wheel:
     name: Build Multiplatform Python Wheels & Sdist
@@ -106,8 +107,17 @@ jobs:
           merge-multiple: true
           path: python/hk/
 
-      - name: List Bundled Native Binaries
-        run: ls -la python/hk/
+      - name: Ensure Generic Native Libs for Runtime
+        shell: bash
+        run: |
+          cd python/hk
+          if [ -f libhk-linux-x86_64.so ] && [ ! -f libhk.so ]; then
+            cp libhk-linux-x86_64.so libhk.so
+          fi
+          if [ -f libhk-macos-arm64.dylib ] && [ ! -f libhk.dylib ]; then
+            cp libhk-macos-arm64.dylib libhk.dylib
+          fi
+          ls -la
 
       - name: Build Source Distribution and Wheel
         run: python -m build
@@ -132,15 +142,24 @@ jobs:
         with:
           path: release-artifacts
 
+      - name: Consolidate Unique Release Assets
+        shell: bash
+        run: |
+          mkdir -p release-files
+          find release-artifacts -type f -exec cp -f {} release-files/ \;
+          ls -la release-files/
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/**/*
+          files: release-files/*
           generate_release_notes: true
+          fail_on_unmatched_files: false
+        continue-on-error: true
 
   publish-pypi:
     name: Publish to PyPI (pip)
-    needs: [build-python-wheel, create-github-release]
+    needs: [build-python-wheel]
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_pypi)
     permissions:
@@ -159,13 +178,12 @@ jobs:
         with:
           packages-dir: dist/
           skip-existing: true
-          # Fallback to token if repository secret exists, otherwise uses OIDC
           password: ${{ secrets.PYPI_API_TOKEN }}
         continue-on-error: true
 
   publish-npm:
     name: Publish to NPM
-    needs: [build-native-binaries, create-github-release]
+    needs: [build-native-binaries]
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
     steps:
@@ -184,6 +202,18 @@ jobs:
           merge-multiple: true
           path: bindings/js/lib/
 
+      - name: Ensure Generic Native Libs for NPM
+        shell: bash
+        run: |
+          cd bindings/js/lib
+          if [ -f libhk-linux-x86_64.so ] && [ ! -f libhk.so ]; then
+            cp libhk-linux-x86_64.so libhk.so
+          fi
+          if [ -f libhk-macos-arm64.dylib ] && [ ! -f libhk.dylib ]; then
+            cp libhk-macos-arm64.dylib libhk.dylib
+          fi
+          ls -la
+
       - name: Install Dependencies & Build TypeScript
         run: |
           cd bindings/js
@@ -200,7 +230,7 @@ jobs:
 
   publish-crates:
     name: Publish to Crates.io (Rust)
-    needs: [build-native-binaries, create-github-release]
+    needs: [build-native-binaries]
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_crates)
     steps:
@@ -214,7 +244,7 @@ jobs:
 
   publish-nuget:
     name: Publish to NuGet (C#)
-    needs: [build-native-binaries, create-github-release]
+    needs: [build-native-binaries]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -239,7 +269,7 @@ jobs:
 
   publish-java:
     name: Publish Java Package to GitHub Packages
-    needs: [create-github-release]
+    needs: [build-native-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -261,4 +291,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
+
 
