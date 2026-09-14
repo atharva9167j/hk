@@ -85,35 +85,58 @@ pub fn main(init: std.process.Init) !void {
     var total_bytes: u64 = 0;
     var skipped: usize = 0;
 
+    // Which tensor names are one of our per-layer matmul weights (kept resident
+    // for the compute pass below) vs everything else in the container
+    // (embeddings, per-layer norms, output head, output norm -- uploaded and
+    // measured too, since llama.cpp's -ngl full offload moves those as well,
+    // but not needed after that so freed immediately).
+    const isMatmulWeight = struct {
+        fn check(name: []const u8) bool {
+            if (!std.mem.startsWith(u8, name, "blk.")) return false;
+            for (WEIGHT_SUFFIXES) |suffix| {
+                var buf: [16]u8 = undefined;
+                const wanted = std.fmt.bufPrint(&buf, ".{s}.", .{suffix}) catch continue;
+                if (std.mem.indexOf(u8, name, wanted) != null) return true;
+            }
+            return false;
+        }
+    }.check;
+
+    var total_tensors: usize = 0;
     const io = std.Options.debug_io;
     const upload_start = std.Io.Clock.Timestamp.now(io, .awake);
-    for (0..layer_count) |l| {
-        for (WEIGHT_SUFFIXES) |suffix| {
-            var tname_buf: [96]u8 = undefined;
-            const tname = try std.fmt.bufPrint(&tname_buf, "blk.{d}.{s}.weight", .{ l, suffix });
-            const entry = reader.toc.find(tname) orelse continue;
-            if (entry.storage_type != .q8_0 and entry.storage_type != .f32) {
-                skipped += 1;
-                continue;
-            }
-            const bytes = try reader.getTensorData(entry);
-            const dev = try cuda.DeviceBuffer.upload(bytes);
-            total_bytes += bytes.len;
+    for (reader.toc.entries.items) |entry| {
+        if (entry.storage_type != .q8_0 and entry.storage_type != .f32) {
+            skipped += 1;
+            continue;
+        }
+        const bytes = try reader.getTensorData(entry);
+        const dev = try cuda.DeviceBuffer.upload(bytes);
+        total_bytes += bytes.len;
+        total_tensors += 1;
 
-            const rows: usize = @intCast(entry.shape[0]);
-            const cols: usize = @intCast(entry.shape[1]);
-            max_rows = @max(max_rows, rows);
-            max_cols = @max(max_cols, cols);
+        if (!isMatmulWeight(entry.name)) {
+            // Full-model transfer accounting only -- not one of the linear
+            // layers the compute pass below exercises.
+            dev.free();
+            continue;
+        }
 
+        const rows: usize = @intCast(entry.shape[0]);
+        const cols: usize = @intCast(entry.shape[1]);
+        max_rows = @max(max_rows, rows);
+        max_cols = @max(max_cols, cols);
+
+        {
             var wref: WeightRef = .{
                 .dev = dev,
                 .storage_type = entry.storage_type,
                 .rows = rows,
                 .cols = cols,
                 .name = undefined,
-                .name_len = tname.len,
+                .name_len = @min(entry.name.len, 96),
             };
-            @memcpy(wref.name[0..tname.len], tname);
+            @memcpy(wref.name[0..wref.name_len], entry.name[0..wref.name_len]);
             try weights.append(allocator, wref);
         }
     }
@@ -123,13 +146,14 @@ pub fn main(init: std.process.Init) !void {
     const upload_s = @as(f64, @floatFromInt(upload_ns)) / 1e9;
     const gb = @as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0 * 1024.0);
     std.debug.print(
-        "\n== Weight upload (host mmap -> VRAM) ==\n" ++
-            "  tensors uploaded : {d} (skipped {d} non-f32/q8_0)\n" ++
+        "\n== Full-model upload (host mmap -> VRAM), matches what llama.cpp's -ngl full offload moves ==\n" ++
+            "  tensors uploaded : {d} total ({d} linear-layer weights kept resident, rest freed after transfer; skipped {d} non-f32/q8_0)\n" ++
             "  total size       : {d:.3} GB\n" ++
             "  wall time        : {d:.2} ms\n" ++
             "  throughput       : {d:.2} GB/s\n" ++
-            "  VRAM used        : {d} MiB (free {d} -> {d} MiB)\n",
+            "  VRAM resident now: {d} MiB (free {d} -> {d} MiB)\n",
         .{
+            total_tensors,
             weights.items.len,
             skipped,
             gb,

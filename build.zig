@@ -76,6 +76,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(cli_exe);
 
+    // CPU pp/tg throughput benchmark (no CUDA required)
+    const cpu_bench_mod = b.createModule(.{
+        .root_source_file = b.path("tools/hk_cpu_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "hk", .module = hk_mod },
+        },
+    });
+    const cpu_bench_exe = b.addExecutable(.{
+        .name = "hk-cpu-bench",
+        .root_module = cpu_bench_mod,
+    });
+    b.installArtifact(cpu_bench_exe);
+
     // Tests
     const tests_mod = b.createModule(.{
         .root_source_file = b.path("tests/roundtrip_tests.zig"),
