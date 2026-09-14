@@ -123,6 +123,9 @@ if _LIB is not None:
     if hasattr(_LIB, "hk_get_tensor_raw_ptr"):
         _LIB.hk_get_tensor_raw_ptr.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64)]
         _LIB.hk_get_tensor_raw_ptr.restype = ctypes.c_void_p
+    if hasattr(_LIB, "hk_get_raw_buffer"):
+        _LIB.hk_get_raw_buffer.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)]
+        _LIB.hk_get_raw_buffer.restype = ctypes.c_void_p
     if hasattr(_LIB, "hk_gemv_bf16"):
         _LIB.hk_gemv_bf16.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_size_t]
         _LIB.hk_gemv_bf16.restype = None
@@ -1757,93 +1760,108 @@ class NativeHKReader:
         self.alignment: int = 128
         self.header: Any = types.SimpleNamespace(alignment=128)
         try:
-            with open(file_path, "rb") as f:
-                header_bytes = f.read(128)
-                if len(header_bytes) >= 128:
-                    (
-                        magic,
-                        ver_maj,
-                        ver_min,
-                        flags,
-                        align,
-                        split_index,
-                        t_count,
-                        kv_count,
-                        meta_off,
-                        meta_size,
-                        toc_off,
-                        toc_size,
-                        data_off,
-                        app_off,
-                        chk,
-                        split_count,
-                        _,
-                    ) = struct.unpack_from("<4s H H I H H Q Q Q Q Q Q Q Q Q H 38s", header_bytes, 0)
-                    self.alignment = align
-                    self.split_index = split_index
-                    self.split_count = split_count
-                    self.is_sharded = bool(flags & 0x00000040 or split_count > 1)
-                    self.is_raw_storage = bool(flags & 0x00000080)
-                    self.is_universal_page_aligned = bool(flags & 0x00000100)
-                    self.is_tensor_core_aligned = bool((align % 128) == 0)
-                    self.header = types.SimpleNamespace(
-                        magic=magic,
-                        version_major=ver_maj,
-                        version_minor=ver_min,
-                        flags=flags,
-                        alignment=align,
-                        split_index=split_index,
-                        split_count=split_count,
-                        tensor_count=t_count,
-                        metadata_kv_count=kv_count,
-                        metadata_offset=meta_off,
-                        metadata_size=meta_size,
-                        tensor_toc_offset=toc_off,
-                        tensor_toc_size=toc_size,
-                        tensor_data_offset=data_off,
-                        appendix_offset=app_off,
-                        checksum=chk,
-                    )
-                    if magic == b"HKNT" and meta_size > 0 and meta_off > 0:
-                        f.seek(meta_off)
-                        m_data = f.read(meta_size)
-                        m_pos = 0
-                        for _ in range(kv_count):
-                            if m_pos + 2 > len(m_data):
-                                break
-                            klen = struct.unpack_from("<H", m_data, m_pos)[0]
-                            m_pos += 2
-                            if m_pos + klen > len(m_data):
-                                break
-                            k = m_data[m_pos : m_pos + klen].decode("utf-8", errors="ignore")
-                            m_pos += klen
-                            if m_pos + 1 > len(m_data):
-                                break
-                            tag = m_data[m_pos]
-                            m_pos += 1
-                            if m_pos + 4 > len(m_data):
-                                break
-                            vlen = struct.unpack_from("<I", m_data, m_pos)[0]
-                            m_pos += 4
-                            if m_pos + vlen > len(m_data):
-                                break
-                            raw_val = m_data[m_pos : m_pos + vlen]
-                            m_pos += vlen
-                            if tag == 0x01:
+            mmap_buf = None
+            if _LIB is not None and hasattr(_LIB, "hk_get_raw_buffer"):
+                raw_buf_size = ctypes.c_uint64(0)
+                raw_ptr = _LIB.hk_get_raw_buffer(self.ptr, ctypes.byref(raw_buf_size))
+                if raw_ptr and raw_buf_size.value >= 128:
+                    mmap_buf = (ctypes.c_char * raw_buf_size.value).from_address(raw_ptr)
+
+            if mmap_buf is not None:
+                header_bytes = bytes(mmap_buf[:128])
+            else:
+                with open(file_path, "rb") as f:
+                    header_bytes = f.read(128)
+
+            if len(header_bytes) >= 128:
+                (
+                    magic,
+                    ver_maj,
+                    ver_min,
+                    flags,
+                    align,
+                    split_index,
+                    t_count,
+                    kv_count,
+                    meta_off,
+                    meta_size,
+                    toc_off,
+                    toc_size,
+                    data_off,
+                    app_off,
+                    chk,
+                    split_count,
+                    _,
+                ) = struct.unpack_from("<4s H H I H H Q Q Q Q Q Q Q Q Q H 38s", header_bytes, 0)
+                self.alignment = align
+                self.split_index = split_index
+                self.split_count = split_count
+                self.is_sharded = bool(flags & 0x00000040 or split_count > 1)
+                self.is_raw_storage = bool(flags & 0x00000080)
+                self.is_universal_page_aligned = bool(flags & 0x00000100)
+                self.is_tensor_core_aligned = bool((align % 128) == 0)
+                self.header = types.SimpleNamespace(
+                    magic=magic,
+                    version_major=ver_maj,
+                    version_minor=ver_min,
+                    flags=flags,
+                    alignment=align,
+                    split_index=split_index,
+                    split_count=split_count,
+                    tensor_count=t_count,
+                    metadata_kv_count=kv_count,
+                    metadata_offset=meta_off,
+                    metadata_size=meta_size,
+                    tensor_toc_offset=toc_off,
+                    tensor_toc_size=toc_size,
+                    tensor_data_offset=data_off,
+                    appendix_offset=app_off,
+                    checksum=chk,
+                )
+                if magic == b"HKNT" and meta_size > 0 and meta_off > 0:
+                    if mmap_buf is not None and (meta_off + meta_size) <= len(mmap_buf):
+                        m_data = bytes(mmap_buf[meta_off : meta_off + meta_size])
+                    else:
+                        with open(file_path, "rb") as f:
+                            f.seek(meta_off)
+                            m_data = f.read(meta_size)
+                    m_pos = 0
+                    for _ in range(kv_count):
+                        if m_pos + 2 > len(m_data):
+                            break
+                        klen = struct.unpack_from("<H", m_data, m_pos)[0]
+                        m_pos += 2
+                        if m_pos + klen > len(m_data):
+                            break
+                        k = m_data[m_pos : m_pos + klen].decode("utf-8", errors="ignore")
+                        m_pos += klen
+                        if m_pos + 1 > len(m_data):
+                            break
+                        tag = m_data[m_pos]
+                        m_pos += 1
+                        if m_pos + 4 > len(m_data):
+                            break
+                        vlen = struct.unpack_from("<I", m_data, m_pos)[0]
+                        m_pos += 4
+                        if m_pos + vlen > len(m_data):
+                            break
+                        raw_val = m_data[m_pos : m_pos + vlen]
+                        m_pos += vlen
+                        if tag == 0x01:
+                            self.metadata[k] = raw_val.decode("utf-8", errors="ignore")
+                        elif tag == 0x02:
+                            self.metadata[k] = struct.unpack("<q", raw_val)[0]
+                        elif tag == 0x03:
+                            self.metadata[k] = struct.unpack("<d", raw_val)[0]
+                        elif tag == 0x04:
+                            self.metadata[k] = bool(raw_val[0])
+                        elif tag == 0x05:
+                            try:
+                                self.metadata[k] = json.loads(raw_val.decode("utf-8"))
+                            except Exception:
                                 self.metadata[k] = raw_val.decode("utf-8", errors="ignore")
-                            elif tag == 0x02:
-                                self.metadata[k] = struct.unpack("<q", raw_val)[0]
-                            elif tag == 0x03:
-                                self.metadata[k] = struct.unpack("<d", raw_val)[0]
-                            elif tag == 0x04:
-                                self.metadata[k] = bool(raw_val[0])
-                            elif tag == 0x05:
-                                try:
-                                    self.metadata[k] = json.loads(raw_val.decode("utf-8"))
-                                except Exception:
-                                    self.metadata[k] = raw_val.decode("utf-8", errors="ignore")
-                            else:
-                                self.metadata[k] = raw_val.decode("utf-8", errors="ignore")
+                        else:
+                            self.metadata[k] = raw_val.decode("utf-8", errors="ignore")
         except Exception:
             pass
 

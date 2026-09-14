@@ -1702,6 +1702,16 @@ pub export fn hk_get_tensor_raw_ptr(reader_ptr: ?*const hk_reader_t, index: u64,
     return @ptrCast(data_bytes.ptr);
 }
 
+pub export fn hk_get_raw_buffer(reader_ptr: ?*const hk_reader_t, out_size: ?*u64) ?*const anyopaque {
+    if (reader_ptr == null) return null;
+    const wrapper: *const ReaderWrapper = @ptrCast(@alignCast(reader_ptr));
+    const bytes = wrapper.reader.mmap_region.bytes;
+    if (out_size) |sz| {
+        sz.* = bytes.len;
+    }
+    return @ptrCast(bytes.ptr);
+}
+
 pub export fn hk_gemv_bf16(
     w_bf16: [*]const u16,
     x: [*]const f32,

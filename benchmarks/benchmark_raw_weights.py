@@ -58,11 +58,16 @@ def run_benchmark():
     print(f"Is Universal Page Aligned: {store.is_universal_page_aligned}")
     print(f"Is Tensor Core Aligned   : {store.is_tensor_core_aligned}")
 
-    # 4. Direct Zero-Copy Tensor Retrieval Latency
+    # 4. Direct Zero-Copy Tensor Retrieval Latency (Cold vs Warm)
     t0 = time.perf_counter()
     q_bf16 = store["transformer.layer.0.attn.q_proj.bf16"]
-    bf16_access_us = (time.perf_counter() - t0) * 1_000_000.0
-    print(f"Zero-Copy Tensor Extract : {bf16_access_us:.2f} us (shape={list(q_bf16.shape)}, dtype={q_bf16.dtype})")
+    cold_access_us = (time.perf_counter() - t0) * 1_000_000.0
+
+    t0 = time.perf_counter()
+    _ = store["transformer.layer.0.attn.q_proj.bf16"]
+    warm_access_us = (time.perf_counter() - t0) * 1_000_000.0
+
+    print(f"Zero-Copy Tensor Extract : {cold_access_us:.2f} us (Cold) | {warm_access_us:.2f} us (Warm Cached) (shape={list(q_bf16.shape)}, dtype={q_bf16.dtype})")
 
     # 5. Raw Direct GEMV Compute Throughput (without decoding/copying)
     iters = 10

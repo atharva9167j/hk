@@ -463,6 +463,7 @@ HK_API int hk_is_raw_storage(const hk_reader_t* reader);
 HK_API int hk_is_universal_page_aligned(const hk_reader_t* reader);
 HK_API uint32_t hk_get_file_alignment(const hk_reader_t* reader);
 HK_API const void* hk_get_tensor_raw_ptr(const hk_reader_t* reader, uint64_t index, uint64_t* out_size);
+HK_API const void* hk_get_raw_buffer(const hk_reader_t* reader, uint64_t* out_size);
 
 // Raw Weights Linear Algebra (Zero-Copy GEMV & Dot Products)
 HK_API void hk_gemv_bf16(const uint16_t* w_bf16, const float* x, const float* bias, float* y, size_t m, size_t k);

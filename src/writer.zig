@@ -232,11 +232,7 @@ pub const HKWriter = struct {
         // Pad up to tensor_data_offset
         const current_file_pos = header_size + meta_size + final_toc_bytes.len;
         if (tensor_data_offset > current_file_pos) {
-            const pad_len = tensor_data_offset - current_file_pos;
-            const zeros = try self.allocator.alloc(u8, pad_len);
-            defer self.allocator.free(zeros);
-            @memset(zeros, 0);
-            try file.writeStreamingAll(io, zeros);
+            try writeZeroPad(&file, io, tensor_data_offset - current_file_pos);
         }
 
         // Write Tensor Payloads
@@ -251,11 +247,7 @@ pub const HKWriter = struct {
 
             // Pad to data_offset
             if (entry.data_offset > write_pos) {
-                const pad = entry.data_offset - write_pos;
-                const pad_bytes = try self.allocator.alloc(u8, pad);
-                defer self.allocator.free(pad_bytes);
-                @memset(pad_bytes, 0);
-                try file.writeStreamingAll(io, pad_bytes);
+                try writeZeroPad(&file, io, entry.data_offset - write_pos);
                 write_pos = entry.data_offset;
             }
             if (t.data.len > 0) {
@@ -265,11 +257,7 @@ pub const HKWriter = struct {
 
             if (t.scales) |s| {
                 if (entry.scale_offset > write_pos) {
-                    const pad = entry.scale_offset - write_pos;
-                    const pad_bytes = try self.allocator.alloc(u8, pad);
-                    defer self.allocator.free(pad_bytes);
-                    @memset(pad_bytes, 0);
-                    try file.writeStreamingAll(io, pad_bytes);
+                    try writeZeroPad(&file, io, entry.scale_offset - write_pos);
                     write_pos = entry.scale_offset;
                 }
                 try file.writeStreamingAll(io, s);
@@ -278,11 +266,7 @@ pub const HKWriter = struct {
 
             if (t.residual) |r| {
                 if (entry.residual_offset > write_pos) {
-                    const pad = entry.residual_offset - write_pos;
-                    const pad_bytes = try self.allocator.alloc(u8, pad);
-                    defer self.allocator.free(pad_bytes);
-                    @memset(pad_bytes, 0);
-                    try file.writeStreamingAll(io, pad_bytes);
+                    try writeZeroPad(&file, io, entry.residual_offset - write_pos);
                     write_pos = entry.residual_offset;
                 }
                 try file.writeStreamingAll(io, r);
@@ -291,3 +275,13 @@ pub const HKWriter = struct {
         }
     }
 };
+
+fn writeZeroPad(file: anytype, io: anytype, pad_len: usize) !void {
+    const ZERO_PAD: [4096]u8 = [_]u8{0} ** 4096;
+    var rem = pad_len;
+    while (rem > 0) {
+        const chunk = @min(rem, ZERO_PAD.len);
+        try file.writeStreamingAll(io, ZERO_PAD[0..chunk]);
+        rem -= chunk;
+    }
+}

@@ -32,25 +32,43 @@ pub const AtomicPool = struct {
     }
 };
 
-/// Fast SIMD dot product of two f32 slices using 4 independent accumulators
+/// Fast SIMD dot product of two f32 slices using 4 independent 8-wide vector accumulators (32 floats/iter)
 pub fn dotProductF32(a: []const f32, b: []const f32) f32 {
     const len = @min(a.len, b.len);
     var i: usize = 0;
 
-    var acc0: f32 = 0.0;
-    var acc1: f32 = 0.0;
-    var acc2: f32 = 0.0;
-    var acc3: f32 = 0.0;
+    var acc0: @Vector(8, f32) = @splat(0.0);
+    var acc1: @Vector(8, f32) = @splat(0.0);
+    var acc2: @Vector(8, f32) = @splat(0.0);
+    var acc3: @Vector(8, f32) = @splat(0.0);
 
-    // 4 independent accumulators unrolled loop (saturates dual FMA pipelines without alignment faults)
-    while (i + 4 <= len) : (i += 4) {
-        acc0 += a[i + 0] * b[i + 0];
-        acc1 += a[i + 1] * b[i + 1];
-        acc2 += a[i + 2] * b[i + 2];
-        acc3 += a[i + 3] * b[i + 3];
+    // 4 independent vector accumulators unrolled (32 elements per iteration)
+    // Saturates dual 256-bit AVX2/AVX-512 FMA execution units
+    while (i + 32 <= len) : (i += 32) {
+        const va0: @Vector(8, f32) = a[i + 0 ..][0..8].*;
+        const vb0: @Vector(8, f32) = b[i + 0 ..][0..8].*;
+        acc0 += va0 * vb0;
+
+        const va1: @Vector(8, f32) = a[i + 8 ..][0..8].*;
+        const vb1: @Vector(8, f32) = b[i + 8 ..][0..8].*;
+        acc1 += va1 * vb1;
+
+        const va2: @Vector(8, f32) = a[i + 16 ..][0..8].*;
+        const vb2: @Vector(8, f32) = b[i + 16 ..][0..8].*;
+        acc2 += va2 * vb2;
+
+        const va3: @Vector(8, f32) = a[i + 24 ..][0..8].*;
+        const vb3: @Vector(8, f32) = b[i + 24 ..][0..8].*;
+        acc3 += va3 * vb3;
     }
 
-    var sum = (acc0 + acc1) + (acc2 + acc3);
+    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3));
+
+    while (i + 8 <= len) : (i += 8) {
+        const va: @Vector(8, f32) = a[i..][0..8].*;
+        const vb: @Vector(8, f32) = b[i..][0..8].*;
+        sum += @reduce(.Add, va * vb);
+    }
 
     // Scalar remainder
     while (i < len) : (i += 1) {
@@ -348,15 +366,33 @@ pub fn geluF32(x: []const f32, out: []f32) void {
     }
 }
 
-/// Element-wise Hadamard product: out[i] = a[i] * b[i]
+/// Element-wise Hadamard product: out[i] = a[i] * b[i] (SIMD accelerated)
 pub fn elementWiseMulF32(a: []const f32, b: []const f32, out: []f32) void {
     const len = @min(@min(a.len, b.len), out.len);
-    for (0..len) |i| {
+    var i: usize = 0;
+    while (i + 16 <= len) : (i += 16) {
+        const va0: @Vector(8, f32) = a[i + 0 ..][0..8].*;
+        const vb0: @Vector(8, f32) = b[i + 0 ..][0..8].*;
+        const p0: [8]f32 = va0 * vb0;
+        out[i + 0 ..][0..8].* = p0;
+
+        const va1: @Vector(8, f32) = a[i + 8 ..][0..8].*;
+        const vb1: @Vector(8, f32) = b[i + 8 ..][0..8].*;
+        const p1: [8]f32 = va1 * vb1;
+        out[i + 8 ..][0..8].* = p1;
+    }
+    while (i + 8 <= len) : (i += 8) {
+        const va: @Vector(8, f32) = a[i..][0..8].*;
+        const vb: @Vector(8, f32) = b[i..][0..8].*;
+        const p: [8]f32 = va * vb;
+        out[i..][0..8].* = p;
+    }
+    while (i < len) : (i += 1) {
         out[i] = a[i] * b[i];
     }
 }
 
-/// Fast RMSNorm: y = (x / sqrt(mean(x^2) + eps)) * weight
+/// Fast RMSNorm: y = (x / sqrt(mean(x^2) + eps)) * weight (SIMD accelerated)
 pub fn rmsNormF32(
     x: []const f32,
     weight: []const f32,
@@ -366,15 +402,30 @@ pub fn rmsNormF32(
     const len = @min(@min(x.len, weight.len), out.len);
     if (len == 0) return;
 
-    var sum_sq: f32 = 0.0;
-    for (0..len) |i| {
-        sum_sq += x[i] * x[i];
-    }
-
+    const sum_sq = dotProductF32(x[0..len], x[0..len]);
     const mean_sq = sum_sq / @as(f32, @floatFromInt(len));
     const inv_rms = 1.0 / @sqrt(mean_sq + eps);
+    const v_scale: @Vector(8, f32) = @splat(inv_rms);
 
-    for (0..len) |i| {
+    var i: usize = 0;
+    while (i + 16 <= len) : (i += 16) {
+        const vx0: @Vector(8, f32) = x[i + 0 ..][0..8].*;
+        const vw0: @Vector(8, f32) = weight[i + 0 ..][0..8].*;
+        const p0: [8]f32 = vx0 * v_scale * vw0;
+        out[i + 0 ..][0..8].* = p0;
+
+        const vx1: @Vector(8, f32) = x[i + 8 ..][0..8].*;
+        const vw1: @Vector(8, f32) = weight[i + 8 ..][0..8].*;
+        const p1: [8]f32 = vx1 * v_scale * vw1;
+        out[i + 8 ..][0..8].* = p1;
+    }
+    while (i + 8 <= len) : (i += 8) {
+        const vx: @Vector(8, f32) = x[i..][0..8].*;
+        const vw: @Vector(8, f32) = weight[i..][0..8].*;
+        const p: [8]f32 = vx * v_scale * vw;
+        out[i..][0..8].* = p;
+    }
+    while (i < len) : (i += 1) {
         out[i] = x[i] * inv_rms * weight[i];
     }
 }
@@ -546,11 +597,8 @@ pub fn gemvQ8_0RowBytes(W_row_bytes: []const u8, x: []const f32, blocks_per_row:
         const d: f32 = @floatCast(@as(f16, @bitCast(d_raw)));
         const qs_bytes = W_row_bytes[blk_offset + 2 .. blk_offset + 34];
         const x_sub = x[b * 32 .. (b + 1) * 32];
-        var block_sum: f32 = 0.0;
-        for (0..32) |i| {
-            const q: i8 = @bitCast(qs_bytes[i]);
-            block_sum += @as(f32, @floatFromInt(q)) * x_sub[i];
-        }
+        const qs_i8: [*]const i8 = @ptrCast(qs_bytes.ptr);
+        const block_sum = dotProductInt8F32(qs_i8[0..32], x_sub);
         total_sum += block_sum * d;
     }
     return total_sum;
@@ -673,24 +721,47 @@ pub inline fn bf16ToF32(val: u16) f32 {
 }
 
 /// Fast SIMD dot product of raw BF16 row with f32 activation vector
-/// 4 independent accumulators saturate AMD Zen dual-FMA and Intel/ARM execution units
+/// 4 independent 8-wide vector accumulators (32 elements/iter) saturate AMD Zen dual-FMA and Intel/ARM units
 pub fn dotProductBF16(a: []const u16, b: []const f32) f32 {
     const len = @min(a.len, b.len);
     var i: usize = 0;
 
-    var acc0: f32 = 0.0;
-    var acc1: f32 = 0.0;
-    var acc2: f32 = 0.0;
-    var acc3: f32 = 0.0;
+    var acc0: @Vector(8, f32) = @splat(0.0);
+    var acc1: @Vector(8, f32) = @splat(0.0);
+    var acc2: @Vector(8, f32) = @splat(0.0);
+    var acc3: @Vector(8, f32) = @splat(0.0);
 
-    while (i + 4 <= len) : (i += 4) {
-        acc0 += bf16ToF32(a[i + 0]) * b[i + 0];
-        acc1 += bf16ToF32(a[i + 1]) * b[i + 1];
-        acc2 += bf16ToF32(a[i + 2]) * b[i + 2];
-        acc3 += bf16ToF32(a[i + 3]) * b[i + 3];
+    while (i + 32 <= len) : (i += 32) {
+        const v0_u16: @Vector(8, u16) = a[i + 0 ..][0..8].*;
+        const v0_f32: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), v0_u16) << @splat(16));
+        const vb0: @Vector(8, f32) = b[i + 0 ..][0..8].*;
+        acc0 += v0_f32 * vb0;
+
+        const v1_u16: @Vector(8, u16) = a[i + 8 ..][0..8].*;
+        const v1_f32: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), v1_u16) << @splat(16));
+        const vb1: @Vector(8, f32) = b[i + 8 ..][0..8].*;
+        acc1 += v1_f32 * vb1;
+
+        const v2_u16: @Vector(8, u16) = a[i + 16 ..][0..8].*;
+        const v2_f32: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), v2_u16) << @splat(16));
+        const vb2: @Vector(8, f32) = b[i + 16 ..][0..8].*;
+        acc2 += v2_f32 * vb2;
+
+        const v3_u16: @Vector(8, u16) = a[i + 24 ..][0..8].*;
+        const v3_f32: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), v3_u16) << @splat(16));
+        const vb3: @Vector(8, f32) = b[i + 24 ..][0..8].*;
+        acc3 += v3_f32 * vb3;
     }
 
-    var sum = (acc0 + acc1) + (acc2 + acc3);
+    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3));
+
+    while (i + 8 <= len) : (i += 8) {
+        const v_u16: @Vector(8, u16) = a[i..][0..8].*;
+        const v_f32: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), v_u16) << @splat(16));
+        const vb: @Vector(8, f32) = b[i..][0..8].*;
+        sum += @reduce(.Add, v_f32 * vb);
+    }
+
     while (i < len) : (i += 1) {
         sum += bf16ToF32(a[i]) * b[i];
     }
@@ -724,24 +795,47 @@ pub fn gemvBF16(
     }
 }
 
-/// Fast SIMD dot product of raw FP16 row with f32 activation vector
+/// Fast SIMD dot product of raw FP16 row with f32 activation vector (32 elements/iter)
 pub fn dotProductF16(a: []const f16, b: []const f32) f32 {
     const len = @min(a.len, b.len);
     var i: usize = 0;
 
-    var acc0: f32 = 0.0;
-    var acc1: f32 = 0.0;
-    var acc2: f32 = 0.0;
-    var acc3: f32 = 0.0;
+    var acc0: @Vector(8, f32) = @splat(0.0);
+    var acc1: @Vector(8, f32) = @splat(0.0);
+    var acc2: @Vector(8, f32) = @splat(0.0);
+    var acc3: @Vector(8, f32) = @splat(0.0);
 
-    while (i + 4 <= len) : (i += 4) {
-        acc0 += @as(f32, @floatCast(a[i + 0])) * b[i + 0];
-        acc1 += @as(f32, @floatCast(a[i + 1])) * b[i + 1];
-        acc2 += @as(f32, @floatCast(a[i + 2])) * b[i + 2];
-        acc3 += @as(f32, @floatCast(a[i + 3])) * b[i + 3];
+    while (i + 32 <= len) : (i += 32) {
+        const v0_f16: @Vector(8, f16) = a[i + 0 ..][0..8].*;
+        const v0_f32: @Vector(8, f32) = @floatCast(v0_f16);
+        const vb0: @Vector(8, f32) = b[i + 0 ..][0..8].*;
+        acc0 += v0_f32 * vb0;
+
+        const v1_f16: @Vector(8, f16) = a[i + 8 ..][0..8].*;
+        const v1_f32: @Vector(8, f32) = @floatCast(v1_f16);
+        const vb1: @Vector(8, f32) = b[i + 8 ..][0..8].*;
+        acc1 += v1_f32 * vb1;
+
+        const v2_f16: @Vector(8, f16) = a[i + 16 ..][0..8].*;
+        const v2_f32: @Vector(8, f32) = @floatCast(v2_f16);
+        const vb2: @Vector(8, f32) = b[i + 16 ..][0..8].*;
+        acc2 += v2_f32 * vb2;
+
+        const v3_f16: @Vector(8, f16) = a[i + 24 ..][0..8].*;
+        const v3_f32: @Vector(8, f32) = @floatCast(v3_f16);
+        const vb3: @Vector(8, f32) = b[i + 24 ..][0..8].*;
+        acc3 += v3_f32 * vb3;
     }
 
-    var sum = (acc0 + acc1) + (acc2 + acc3);
+    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3));
+
+    while (i + 8 <= len) : (i += 8) {
+        const v_f16: @Vector(8, f16) = a[i..][0..8].*;
+        const v_f32: @Vector(8, f32) = @floatCast(v_f16);
+        const vb: @Vector(8, f32) = b[i..][0..8].*;
+        sum += @reduce(.Add, v_f32 * vb);
+    }
+
     while (i < len) : (i += 1) {
         sum += @as(f32, @floatCast(a[i])) * b[i];
     }
@@ -774,31 +868,91 @@ pub fn gemvF16(
     }
 }
 
-/// Fast INT8 dot product (optimized for Intel VNNI and ARM NEON pipelines)
+/// Fast INT8 dot product (optimized for Intel VNNI and ARM NEON pipelines, 32 elements/iter)
 pub fn dotProductInt8(a: []const i8, b: []const i8) i32 {
     const len = @min(a.len, b.len);
     var i: usize = 0;
 
-    var acc0: i32 = 0;
-    var acc1: i32 = 0;
-    var acc2: i32 = 0;
-    var acc3: i32 = 0;
+    var acc0: @Vector(8, i32) = @splat(0);
+    var acc1: @Vector(8, i32) = @splat(0);
+    var acc2: @Vector(8, i32) = @splat(0);
+    var acc3: @Vector(8, i32) = @splat(0);
 
-    while (i + 4 <= len) : (i += 4) {
-        acc0 += @as(i32, a[i + 0]) * @as(i32, b[i + 0]);
-        acc1 += @as(i32, a[i + 1]) * @as(i32, b[i + 1]);
-        acc2 += @as(i32, a[i + 2]) * @as(i32, b[i + 2]);
-        acc3 += @as(i32, a[i + 3]) * @as(i32, b[i + 3]);
+    while (i + 32 <= len) : (i += 32) {
+        const v0_a: @Vector(8, i8) = a[i + 0 ..][0..8].*;
+        const v0_b: @Vector(8, i8) = b[i + 0 ..][0..8].*;
+        acc0 += @as(@Vector(8, i32), v0_a) * @as(@Vector(8, i32), v0_b);
+
+        const v1_a: @Vector(8, i8) = a[i + 8 ..][0..8].*;
+        const v1_b: @Vector(8, i8) = b[i + 8 ..][0..8].*;
+        acc1 += @as(@Vector(8, i32), v1_a) * @as(@Vector(8, i32), v1_b);
+
+        const v2_a: @Vector(8, i8) = a[i + 16 ..][0..8].*;
+        const v2_b: @Vector(8, i8) = b[i + 16 ..][0..8].*;
+        acc2 += @as(@Vector(8, i32), v2_a) * @as(@Vector(8, i32), v2_b);
+
+        const v3_a: @Vector(8, i8) = a[i + 24 ..][0..8].*;
+        const v3_b: @Vector(8, i8) = b[i + 24 ..][0..8].*;
+        acc3 += @as(@Vector(8, i32), v3_a) * @as(@Vector(8, i32), v3_b);
     }
 
-    var sum = (acc0 + acc1) + (acc2 + acc3);
+    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3));
+
+    while (i + 8 <= len) : (i += 8) {
+        const va: @Vector(8, i8) = a[i..][0..8].*;
+        const vb: @Vector(8, i8) = b[i..][0..8].*;
+        sum += @reduce(.Add, @as(@Vector(8, i32), va) * @as(@Vector(8, i32), vb));
+    }
+
     while (i < len) : (i += 1) {
         sum += @as(i32, a[i]) * @as(i32, b[i]);
     }
     return sum;
 }
 
-/// Fast Matrix-Vector Multiplication for Raw INT8 Weights with f32 activation:
+/// Fast SIMD dot product of INT8 weights with float32 activations (32 elements/iter)
+pub fn dotProductInt8F32(a: []const i8, b: []const f32) f32 {
+    const len = @min(a.len, b.len);
+    var i: usize = 0;
+
+    var acc0: @Vector(8, f32) = @splat(0.0);
+    var acc1: @Vector(8, f32) = @splat(0.0);
+    var acc2: @Vector(8, f32) = @splat(0.0);
+    var acc3: @Vector(8, f32) = @splat(0.0);
+
+    while (i + 32 <= len) : (i += 32) {
+        const v0_i8: @Vector(8, i8) = a[i + 0 ..][0..8].*;
+        const vb0: @Vector(8, f32) = b[i + 0 ..][0..8].*;
+        acc0 += @as(@Vector(8, f32), @floatFromInt(v0_i8)) * vb0;
+
+        const v1_i8: @Vector(8, i8) = a[i + 8 ..][0..8].*;
+        const vb1: @Vector(8, f32) = b[i + 8 ..][0..8].*;
+        acc1 += @as(@Vector(8, f32), @floatFromInt(v1_i8)) * vb1;
+
+        const v2_i8: @Vector(8, i8) = a[i + 16 ..][0..8].*;
+        const vb2: @Vector(8, f32) = b[i + 16 ..][0..8].*;
+        acc2 += @as(@Vector(8, f32), @floatFromInt(v2_i8)) * vb2;
+
+        const v3_i8: @Vector(8, i8) = a[i + 24 ..][0..8].*;
+        const vb3: @Vector(8, f32) = b[i + 24 ..][0..8].*;
+        acc3 += @as(@Vector(8, f32), @floatFromInt(v3_i8)) * vb3;
+    }
+
+    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3));
+
+    while (i + 8 <= len) : (i += 8) {
+        const v_i8: @Vector(8, i8) = a[i..][0..8].*;
+        const vb: @Vector(8, f32) = b[i..][0..8].*;
+        sum += @reduce(.Add, @as(@Vector(8, f32), @floatFromInt(v_i8)) * vb);
+    }
+
+    while (i < len) : (i += 1) {
+        sum += @as(f32, @floatFromInt(a[i])) * b[i];
+    }
+    return sum;
+}
+
+/// Fast Matrix-Vector Multiplication for Raw INT8 Weights with f32 activation (SIMD accelerated):
 /// y = (W_int8 * x) * scale + bias
 pub fn gemvInt8Scaled(
     W_i8: []const i8,
@@ -817,13 +971,8 @@ pub fn gemvInt8Scaled(
             y[r] = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
             continue;
         }
-        var row_sum: f32 = 0.0;
         const row = W_i8[row_start..row_end];
-        const len = @min(row.len, x.len);
-        for (0..len) |c| {
-            row_sum += @as(f32, @floatFromInt(row[c])) * x[c];
-        }
-        row_sum *= scale_w;
+        var row_sum = dotProductInt8F32(row, x) * scale_w;
         if (bias) |b| {
             if (r < b.len) row_sum += b[r];
         }

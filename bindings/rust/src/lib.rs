@@ -341,6 +341,7 @@ extern "C" {
     fn hk_is_universal_page_aligned(reader: *const HkReaderOpaque) -> c_int;
     fn hk_get_file_alignment(reader: *const HkReaderOpaque) -> u32;
     fn hk_get_tensor_raw_ptr(reader: *const HkReaderOpaque, index: u64, out_size: *mut u64) -> *const c_void;
+    fn hk_get_raw_buffer(reader: *const HkReaderOpaque, out_size: *mut u64) -> *const c_void;
 
     // Raw Weights Linear Algebra
     fn hk_gemv_bf16(w_bf16: *const u16, x: *const f32, bias: *const f32, y: *mut f32, m: usize, k: usize);

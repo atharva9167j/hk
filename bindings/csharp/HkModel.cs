@@ -313,6 +313,9 @@ namespace Hk
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr hk_get_tensor_raw_ptr(IntPtr reader, ulong index, ref ulong out_size);
 
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr hk_get_raw_buffer(IntPtr reader, ref ulong out_size);
+
         // Raw Linear Algebra Kernels
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void hk_gemv_bf16(IntPtr w_bf16, [In] float[] x, [In] float[]? bias, [Out] float[] y, ulong m, ulong k);

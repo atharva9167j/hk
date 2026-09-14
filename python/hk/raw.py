@@ -292,6 +292,8 @@ class HKRawWeightStore:
     def __init__(self, path: Union[str, Path, os.PathLike]):
         self.path = str(path)
         self.reader = NativeHKReader(self.path)
+        self._cached_arrays: Dict[str, np.ndarray] = {}
+        self._cached_tensors: Dict[str, torch.Tensor] = {}
         self.is_raw_storage: bool = getattr(self.reader, "is_raw_storage", False)
         self.is_universal_page_aligned: bool = getattr(self.reader, "is_universal_page_aligned", False)
         self.is_tensor_core_aligned: bool = getattr(self.reader, "is_tensor_core_aligned", True)
@@ -307,6 +309,10 @@ class HKRawWeightStore:
         self.close()
 
     def close(self):
+        if hasattr(self, "_cached_arrays"):
+            self._cached_arrays.clear()
+        if hasattr(self, "_cached_tensors"):
+            self._cached_tensors.clear()
         if hasattr(self, "reader") and self.reader:
             self.reader.close()
 
@@ -320,18 +326,28 @@ class HKRawWeightStore:
         return name in self.reader.tensors
 
     def __getitem__(self, name: str) -> torch.Tensor:
-        """Returns tensor as PyTorch tensor with 0 compute decoding."""
-        arr = self.reader.get_tensor_raw(name)
+        """Returns tensor as PyTorch tensor with 0 compute decoding and instant cached lookup."""
+        t = self._cached_tensors.get(name)
+        if t is not None:
+            return t
+        arr = self.get_numpy(name)
         stype = self.reader.tensors[name]["storage_type"]
         if stype == STORAGE_BF16:
-            return torch.from_numpy(arr.view(np.int16)).view(torch.bfloat16)
+            t = torch.from_numpy(arr.view(np.int16)).view(torch.bfloat16)
         elif stype == STORAGE_BOOL:
-            return torch.from_numpy(arr.astype(bool))
-        return torch.from_numpy(arr)
+            t = torch.from_numpy(arr.astype(bool))
+        else:
+            t = torch.from_numpy(arr)
+        self._cached_tensors[name] = t
+        return t
 
     def get_numpy(self, name: str) -> np.ndarray:
-        """Returns zero-copy raw NumPy array."""
-        return self.reader.get_tensor_raw(name)
+        """Returns zero-copy raw NumPy array with instant cached lookup."""
+        arr = self._cached_arrays.get(name)
+        if arr is None:
+            arr = self.reader.get_tensor_raw(name)
+            self._cached_arrays[name] = arr
+        return arr
 
     def metadata(self) -> Dict[str, Any]:
         return self.reader.metadata
