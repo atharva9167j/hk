@@ -211,15 +211,16 @@ pub fn gemvF32(
     M: usize,
     K: usize,
 ) void {
+    const safe_M = @min(M, y.len);
     const pool = AtomicPool.get();
     var ctx = GemvF32Ctx{
         .W = W,
         .x = x,
         .bias = bias,
-        .y = y,
+        .y = y[0..safe_M],
         .K = K,
     };
-    pool.parallelFor(M, @ptrCast(&ctx), gemvF32Task);
+    pool.parallelFor(safe_M, @ptrCast(&ctx), gemvF32Task);
 }
 
 /// Fast Matrix Multiplication: C = A * B
@@ -784,9 +785,10 @@ pub fn gemvQ8_0(
     M: usize,
     K: usize,
 ) void {
+    const safe_M = @min(M, y.len);
     const blocks_per_row = K / 32;
     const row_bytes_len = blocks_per_row * 34;
-    for (0..M) |r| {
+    for (0..safe_M) |r| {
         const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
         var row_sum = gemvQ8_0RowBytes(row_bytes, x, blocks_per_row);
         if (bias) |b| {
@@ -831,9 +833,10 @@ pub fn gemvQ4_0(
     M: usize,
     K: usize,
 ) void {
+    const safe_M = @min(M, y.len);
     const blocks_per_row = K / 32;
     const row_bytes_len = blocks_per_row * 18;
-    for (0..M) |r| {
+    for (0..safe_M) |r| {
         const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
         var row_sum = gemvQ4_0RowBytes(row_bytes, x, blocks_per_row);
         if (bias) |b| {
@@ -852,13 +855,14 @@ pub fn gemvQ4_K(
     M: usize,
     K: usize,
 ) void {
+    const safe_M = @min(M, y.len);
     const superblocks_per_row = K / 256;
     const row_bytes_len = superblocks_per_row * 144;
     var deq_buf: [256]f32 = undefined;
     var blk: quantization.BlockQ4_K = undefined;
     const blk_slice = std.mem.asBytes(&blk);
 
-    for (0..M) |r| {
+    for (0..safe_M) |r| {
         var row_sum: f32 = 0.0;
         const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
         for (0..superblocks_per_row) |sb_idx| {

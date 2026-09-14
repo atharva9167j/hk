@@ -178,6 +178,49 @@ pub const MetadataMap = struct {
         };
     }
 
+    pub fn find(self: *const MetadataMap, query_key: []const u8) ?MetadataValue {
+        for (self.items.items) |item| {
+            if (std.mem.eql(u8, item.key, query_key)) {
+                return item.value;
+            }
+        }
+        for (self.items.items) |item| {
+            if (std.mem.endsWith(u8, item.key, query_key)) {
+                const prefix_len = item.key.len - query_key.len;
+                if (prefix_len == 0 or item.key[prefix_len - 1] == '.') {
+                    return item.value;
+                }
+            }
+        }
+        return null;
+    }
+
+    pub fn findInt(self: *const MetadataMap, query_key: []const u8) ?i64 {
+        const val = self.find(query_key) orelse return null;
+        return switch (val) {
+            .val_int64 => |v| v,
+            else => null,
+        };
+    }
+
+    pub fn findFloat(self: *const MetadataMap, query_key: []const u8) ?f64 {
+        const val = self.find(query_key) orelse return null;
+        return switch (val) {
+            .val_float64 => |v| v,
+            .val_int64 => |v| @floatFromInt(v),
+            else => null,
+        };
+    }
+
+    pub fn findString(self: *const MetadataMap, query_key: []const u8) ?[]const u8 {
+        const val = self.find(query_key) orelse return null;
+        return switch (val) {
+            .val_string => |v| v,
+            .val_json => |j| j,
+            else => null,
+        };
+    }
+
     /// Serializes metadata map into a byte array
     pub fn serialize(self: *const MetadataMap, writer: *buf.BufferWriter) !void {
         for (self.items.items) |item| {

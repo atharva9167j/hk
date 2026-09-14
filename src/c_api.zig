@@ -1396,23 +1396,21 @@ pub export fn hk_engine_load_from_file(file_path_c: [*:0]const u8) ?*hk_engine_t
     const path = std.mem.sliceTo(file_path_c, 0);
     const allocator = std.heap.page_allocator;
 
-    var r = reader_mod.HKReader.open(path, allocator) catch return null;
-
-    const eng = inference_mod.TransformerEngine.initFromReader(allocator, &r) catch {
-        r.deinit();
-        return null;
-    };
-
-    const wrapper = allocator.create(EngineWrapper) catch {
-        eng.deinit();
-        allocator.destroy(eng);
-        r.deinit();
-        return null;
-    };
+    const wrapper = allocator.create(EngineWrapper) catch return null;
+    errdefer allocator.destroy(wrapper);
 
     wrapper.allocator = allocator;
-    wrapper.reader = r;
-    wrapper.engine = eng;
+    wrapper.reader = reader_mod.HKReader.open(path, allocator) catch {
+        allocator.destroy(wrapper);
+        return null;
+    };
+    errdefer wrapper.reader.deinit();
+
+    wrapper.engine = inference_mod.TransformerEngine.initFromReader(allocator, &wrapper.reader) catch {
+        wrapper.reader.deinit();
+        allocator.destroy(wrapper);
+        return null;
+    };
 
     return @ptrCast(wrapper);
 }
