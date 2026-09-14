@@ -10,6 +10,8 @@ import sys
 import argparse
 import time
 from pathlib import Path
+from typing import Optional
+
 
 import hk
 from hk import __version__
