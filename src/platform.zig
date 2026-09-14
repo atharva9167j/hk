@@ -267,7 +267,6 @@ pub fn mapOrReadFile(path: []const u8, allocator: std.mem.Allocator) !MmapRegion
         }
     }
 
-    // Fallback: synchronous read
     const io = std.Options.debug_io;
     const cwd = std.Io.Dir.cwd();
 
@@ -283,13 +282,38 @@ pub fn mapOrReadFile(path: []const u8, allocator: std.mem.Allocator) !MmapRegion
         };
     }
 
+    // POSIX zero-copy path: real mmap(2), matching the CreateFileMapping/MapViewOfFile
+    // path already implemented above for Windows. std.posix.MAP/PROT are stubbed to
+    // `void` on non-POSIX targets, so this must not be typechecked when building for
+    // Windows even though that branch is unreachable there at runtime.
+    if (@import("builtin").os.tag != .windows) {
+        if (std.posix.mmap(
+            null,
+            size,
+            .{ .READ = true },
+            .{ .TYPE = .PRIVATE },
+            file.handle,
+            0,
+        )) |mapped| {
+            return MmapRegion{
+                .bytes = mapped,
+                .is_mmap = true,
+            };
+        } else |_| {
+            // Fall through to a buffered read (e.g. non-regular file, or mmap
+            // unsupported/denied on this filesystem).
+        }
+    }
+
     const aligned_slice = try allocator.alignedAlloc(u8, .fromByteUnits(PAGE_SIZE), size);
     errdefer allocator.free(aligned_slice);
 
-    var slices = [_][]u8{aligned_slice};
-    const read_len = try file.readStreaming(io, &slices);
-    if (read_len != size) {
-        return error.UnexpectedEof;
+    var total_read: usize = 0;
+    while (total_read < size) {
+        var slices = [_][]u8{aligned_slice[total_read..]};
+        const chunk_read = try file.readStreaming(io, &slices);
+        if (chunk_read == 0) return error.UnexpectedEof;
+        total_read += chunk_read;
     }
 
     return MmapRegion{
