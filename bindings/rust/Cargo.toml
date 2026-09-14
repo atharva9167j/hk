@@ -4,7 +4,11 @@ version = "1.0.0"
 edition = "2021"
 description = "Safe idiomatic Rust bindings for the HK neural tensor format and SIMD compute engine."
 license = "Apache-2.0"
-
+repository = "https://github.com/harshitkhandelwal208/hk"
+homepage = "https://github.com/harshitkhandelwal208/hk"
+documentation = "https://docs.rs/hknt"
+readme = "../../README.md"
 
 [dependencies]
+
 

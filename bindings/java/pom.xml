@@ -10,7 +10,7 @@
 
     <name>HK Neural Tensor Format</name>
     <description>Java / Android JNI bindings for HK neural tensor format and zero-copy inference.</description>
-    <url>https://github.com/hk-format/hk</url>
+    <url>https://github.com/harshitkhandelwal208/hk</url>
 
     <licenses>
         <license>
@@ -18,6 +18,14 @@
             <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
         </license>
     </licenses>
+
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub Packages</name>
+            <url>https://maven.pkg.github.com/harshitkhandelwal208/hk</url>
+        </repository>
+    </distributionManagement>
 
     <properties>
         <maven.compiler.source>11</maven.compiler.source>

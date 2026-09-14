@@ -216,15 +216,49 @@ jobs:
     name: Publish to NuGet (C#)
     needs: [build-native-binaries, create-github-release]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_nuget)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: NuGet Login (OIDC Trusted Publishing)
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: harshitkhandelwal208
       - name: Build & Pack NuGet Package
         run: |
           cd bindings/csharp
           dotnet pack -c Release
-          dotnet nuget push bin/Release/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+          dotnet nuget push bin/Release/*.nupkg --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY || secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
         continue-on-error: true
+
+  publish-java:
+    name: Publish Java Package to GitHub Packages
+    needs: [create-github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          server-id: github
+          settings-path: ${{ github.workspace }}
+      - name: Publish to GitHub Packages
+        run: |
+          cd bindings/java
+          mvn --batch-mode deploy -DskipTests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
