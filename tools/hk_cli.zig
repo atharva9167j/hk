@@ -559,64 +559,119 @@ fn cmdVerify(path: []const u8, allocator: std.mem.Allocator) !void {
     }
 }
 
+fn touchMemory(bytes: []const u8) u64 {
+    var acc0: @Vector(32, u8) = @splat(0);
+    var acc1: @Vector(32, u8) = @splat(0);
+    var i: usize = 0;
+    while (i + 64 <= bytes.len) : (i += 64) {
+        const v0: @Vector(32, u8) = bytes[i + 0 ..][0..32].*;
+        const v1: @Vector(32, u8) = bytes[i + 32 ..][0..32].*;
+        acc0 +%= v0;
+        acc1 +%= v1;
+    }
+    while (i + 32 <= bytes.len) : (i += 32) {
+        const v0: @Vector(32, u8) = bytes[i..][0..32].*;
+        acc0 +%= v0;
+    }
+    var sum: u64 = 0;
+    const red0 = @reduce(.Add, acc0);
+    const red1 = @reduce(.Add, acc1);
+    sum +%= red0;
+    sum +%= red1;
+    while (i < bytes.len) : (i += 1) {
+        sum +%= bytes[i];
+    }
+    return sum;
+}
+
 fn cmdBenchmark(path: []const u8, allocator: std.mem.Allocator) !void {
     const io = std.Options.debug_io;
     std.debug.print("Benchmarking HK loader on '{s}'...\n", .{path});
 
+    // 1. Zero-Copy Open & Deserialization
     const start_open = std.Io.Timestamp.now(io, .awake);
     var reader = try hk.HKReader.open(path, allocator);
     defer reader.deinit();
     const end_open = std.Io.Timestamp.now(io, .awake);
     const open_time_ns = end_open.nanoseconds - start_open.nanoseconds;
 
-    std.debug.print("Zero-Copy Open & Deserialization Time: {d:.2} us\n", .{@as(f64, @floatFromInt(open_time_ns)) / 1000.0});
+    std.debug.print("1. Zero-Copy Open & Deserialization: {d:.2} us\n", .{@as(f64, @floatFromInt(open_time_ns)) / 1000.0});
 
+    // 2. Zero-Copy Slice Pointer Resolution (Metadata / Descriptor Lookup)
+    // Measures the overhead of acquiring pointer descriptors without reading data payload.
     var total_bytes: usize = 0;
-    const start_read = std.Io.Timestamp.now(io, .awake);
+    const start_slice = std.Io.Timestamp.now(io, .awake);
     for (reader.toc.entries.items) |e| {
         const data = try reader.getTensorData(e);
         total_bytes += data.len;
     }
-    const end_read = std.Io.Timestamp.now(io, .awake);
-    const read_time_ns = end_read.nanoseconds - start_read.nanoseconds;
-    const read_sec = @as(f64, @floatFromInt(read_time_ns)) / 1_000_000_000.0;
-    const mbs = if (read_sec > 0) (@as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0)) / read_sec else 0.0;
+    const end_slice = std.Io.Timestamp.now(io, .awake);
+    const slice_time_ns = end_slice.nanoseconds - start_slice.nanoseconds;
+    const slice_us = @as(f64, @floatFromInt(slice_time_ns)) / 1000.0;
+    const num_tensors = reader.toc.entries.items.len;
+    const mslices_per_sec = if (slice_us > 0) (@as(f64, @floatFromInt(num_tensors)) / slice_us) else 0.0;
 
-    std.debug.print("Zero-copy slice traversal: {d:.2} us ({} bytes total, throughput: {d:.1} MB/s)\n", .{
-        @as(f64, @floatFromInt(read_time_ns)) / 1000.0,
-        total_bytes,
-        mbs,
+    std.debug.print("2. Lazy Slice Pointer Resolution (no page touches): {d:.2} us ({} tensors, {d:.1} M-slices/s)\n", .{
+        slice_us,
+        num_tensors,
+        mslices_per_sec,
     });
 
-    // Benchmark Dequantization throughput
+    // 3. Physical Memory Traversal & First-Touch Page-In
+    // Actually touches every page and byte of mapped memory using 256-bit SIMD reads,
+    // bringing pages into physical RAM and measuring actual hardware memory/storage throughput.
+    var checksum: u64 = 0;
+    const start_touch = std.Io.Timestamp.now(io, .awake);
+    for (reader.toc.entries.items) |e| {
+        const data = try reader.getTensorData(e);
+        checksum +%= touchMemory(data);
+    }
+    const end_touch = std.Io.Timestamp.now(io, .awake);
+    const touch_time_ns = end_touch.nanoseconds - start_touch.nanoseconds;
+    const touch_sec = @as(f64, @floatFromInt(touch_time_ns)) / 1_000_000_000.0;
+    const touch_mbs = if (touch_sec > 0) (@as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0)) / touch_sec else 0.0;
+
+    std.debug.print("3. Physical Memory Traversal & First-Touch Page-In: {d:.2} ms ({} bytes total, throughput: {d:.1} MB/s, checksum: 0x{x:0>16})\n", .{
+        touch_sec * 1000.0,
+        total_bytes,
+        touch_mbs,
+        checksum,
+    });
+
+    // 4. In-Memory Reconstruction & Dequantization (Resident SIMD Compute)
+    // Uses a per-tensor reusable scratch buffer sized to the largest tensor to prevent
+    // artificial multi-gigabyte virtual memory allocator churn and swap paging.
+    var max_numel: usize = 0;
     var total_elements: usize = 0;
     for (reader.toc.entries.items) |e| {
         var numel: usize = 1;
         for (0..e.ndim) |d| numel *= @intCast(e.shape[d]);
         total_elements += numel;
+        if (numel > max_numel) max_numel = numel;
     }
 
-    const deq_buf = try allocator.alloc(f32, total_elements);
-    defer allocator.free(deq_buf);
+    if (max_numel > 0) {
+        const deq_buf = try allocator.alloc(f32, max_numel);
+        defer allocator.free(deq_buf);
 
-    const start_deq = std.Io.Timestamp.now(io, .awake);
-    var offset: usize = 0;
-    for (reader.toc.entries.items) |e| {
-        var numel: usize = 1;
-        for (0..e.ndim) |d| numel *= @intCast(e.shape[d]);
-        reader.dequantizeToF32(e, true, deq_buf[offset .. offset + numel]) catch {};
-        offset += numel;
+        const start_deq = std.Io.Timestamp.now(io, .awake);
+        for (reader.toc.entries.items) |e| {
+            var numel: usize = 1;
+            for (0..e.ndim) |d| numel *= @intCast(e.shape[d]);
+            reader.dequantizeToF32(e, true, deq_buf[0..numel]) catch {};
+        }
+        const end_deq = std.Io.Timestamp.now(io, .awake);
+        const deq_time_ns = end_deq.nanoseconds - start_deq.nanoseconds;
+        const deq_sec = @as(f64, @floatFromInt(deq_time_ns)) / 1_000_000_000.0;
+        const melem_per_sec = if (deq_sec > 0) (@as(f64, @floatFromInt(total_elements)) / 1_000_000.0) / deq_sec else 0.0;
+
+        std.debug.print("4. Reconstruction & Dequantization (in-memory compute): {d:.2} ms ({} elements, throughput: {d:.2} M-elem/s, scratch buffer: {d:.1} MB)\n\n", .{
+            deq_sec * 1000.0,
+            total_elements,
+            melem_per_sec,
+            @as(f64, @floatFromInt(max_numel * @sizeOf(f32))) / (1024.0 * 1024.0),
+        });
     }
-    const end_deq = std.Io.Timestamp.now(io, .awake);
-    const deq_time_ns = end_deq.nanoseconds - start_deq.nanoseconds;
-    const deq_sec = @as(f64, @floatFromInt(deq_time_ns)) / 1_000_000_000.0;
-    const melem_per_sec = if (deq_sec > 0) (@as(f64, @floatFromInt(total_elements)) / 1_000_000.0) / deq_sec else 0.0;
-
-    std.debug.print("Reconstruction & dequantization: {d:.2} ms ({} elements, throughput: {d:.2} M-elem/s)\n\n", .{
-        deq_sec * 1000.0,
-        total_elements,
-        melem_per_sec,
-    });
 }
 
 fn cmdRetile(in_path: []const u8, out_path: []const u8, layout_str: []const u8, allocator: std.mem.Allocator) !void {

@@ -6,29 +6,76 @@
 [![Native Tests](https://img.shields.io/badge/Zig%20Tests-42%2F42%20Passing-brightgreen.svg)](tests/)
 [![Platforms](https://img.shields.io/badge/Platforms-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20macOS%20%7C%20Windows-purple.svg)](bindings/)
 
-HK is a unified neural framework and binary container format (`.hk`) engineered to supersede legacy model files (SafeTensors, GGUF, and PyTorch checkpoints) with a single, high-performance architecture. Built primarily in native Zig with zero-overhead C-ABI bindings across 7 languages, it establishes a new standard for **raw unquantized weight storage, universal multi-device super-coalescing, hardware page-cache memory mapping, lossless 2:4 structured sparsity, SIMD execution, and modular architecture evolution**, while maintaining **complete quantization parity** for resource-constrained edge deployments.
+HK is a next-generation neural framework and unified binary container format (`.hk`) engineered for **continuous model evolution, end-to-end training, autonomous self-learning, dynamic architecture growth (Net2Net), and universal super-coalesced storage**. Built with a native Zig SIMD engine and zero-overhead C-ABI bindings across 7 programming languages, HK supersedes static legacy formats (SafeTensors, GGUF, and PyTorch checkpoints) with an active, living neural architecture that learns, widens, and adapts over time.
 
 ---
 
-## Two Operating Modes: Native GPU vs. Universal Raw Weight
+## The Four Pillars of the HK Framework
 
-HK is architected around two complementary operating modes sharing the same high-performance binary container engine:
+```
+                    +-------------------------------------------------------+
+                    |             HK NEURAL TENSOR FRAMEWORK                |
+                    +-------------------------------------------------------+
+                               /              |             \             \
+                              /               |              \             \
+                             v                v               v             v
+       +-------------------------+  +-------------------+  +---------------+  +-------------------------+
+       |   AUTONOMOUS GROWTH     |  |     TRAINING &    |  |  SELF-LEARNING|  |    SUPER-COALESCED      |
+       |     & EVOLUTION         |  |    FINE-TUNING    |  |  & SELF-PLAY  |  |    STORAGE & DMA        |
+       |-------------------------|  |-------------------|  |---------------|  |-------------------------|
+       | • Net2WiderNet (SwiGLU) |  | • HKTrainer       |  | • SelfTrainer |  | • 0 Compute Headroom    |
+       | • Net2DeeperNet Layers  |  | • Native QLoRA    |  | • <think> Mon.|  | • 4KB/16KB/128B Multi-Dev|
+       | • Dynamic Vocab Growth  |  | • Loss-Plateau Exp|  | • SPIN Loss   |  | • Ampere 2:4 Sparsity   |
+       | • Zig GrowthGovernor    |  | • Plasticity Mask |  | • Sandbox Eval|  | • In-Container DAG/Roll |
+       +-------------------------+  +-------------------+  +---------------+  +-------------------------+
+```
 
-| Capability | Mode 1: Native GPU / Quantized & Tiled Mode | Mode 2: Universal Raw Weight Mode |
+| Capability | Static Legacy Formats (SafeTensors / GGUF) | HK Autonomous Neural Framework |
 | :--- | :--- | :--- |
-| **Target Silicon** | NVIDIA GPUs & high-throughput accelerators | AMD GPUs/CPUs, Intel NPUs/CPUs, Apple Silicon, ARM & NVIDIA |
-| **Data Types** | NF4, FP4, DQ8, FP8, 2:4 structured sparse tensors | BF16, FP16, FP32, INT8, INT16, INT32, INT64, BOOL |
-| **Compute Overhead** | Hardware dequantization / tensor core decoding | **Zero compute headroom** (direct memory mapping) |
-| **Memory Alignment** | **128-byte coalescing** (`TILE_ALIGNED`, `SPARSITY_2_4`) | **4096-byte super-coalesced** (AMD/Intel/Apple/NVIDIA) |
-| **NVIDIA Coalescing** | 100% strict warp coalescing | 100% strict warp coalescing ($4096 \pmod{128} = 0$) |
-| **Sharding / Split Mode**| Supported (layer splitting, regeneratable weights) | Supported (`save_sharded_raw` / `load_sharded_raw`) |
-| **Primary APIs** | `hk.save_file()`, `hk.load_file()`, `NativeHKEngine` | `hk.save_raw()`, `hk.load_raw()`, `HKRawWeightStore` |
+| **Model Lifecycle** | Frozen, static file on disk | **Living architecture that grows, trains, and evolves** |
+| **Capacity Expansion** | Impossible (requires retraining from scratch) | **Function-preserving Net2Net growth ($f_{\text{new}}(x) \equiv f_{\text{old}}(x)$)** |
+| **Hardware Safety** | Manual trial-and-error OOM crashes | **Native Zig `GrowthGovernor` (50k constraints evaluated in 3.57 ms)** |
+| **Training Integration**| External third-party scripts | **Native `HKTrainer` with automated plateau-triggered widening** |
+| **Self-Learning Loop** | External synthetic data pipelines | **Closed-loop self-play (SPIN), inner monologue (`<think>`), and sandboxing** |
+| **Catastrophic Forgetting**| Base representations get corrupted | **Plasticity Isolation gradient shielding (`protect_base_capacity`)** |
+| **Version Lineage** | External Git LFS commits / full file duplication | **Cryptographic in-container Appendix DAG with instant rollback** |
+| **Storage Architecture**| Unaligned JSON blobs or lossy quantizations | **Super-Coalesced raw weights: 4KB AMD/Intel + 16KB Apple + 128B NVIDIA** |
+| **Hardware Sparsity** | None | **Native Ampere 2:4 structured sparsity (1.88× physical reduction, 0.000000 error)**|
+
+> [!NOTE]
+> **Active Research & Early Prototype Status**:  
+> While the binary container format (`.hk`), zero-copy memory mapping, multi-device super-coalescing (128B/4KB/16KB), Ampere 2:4 structured sparsity, SIMD GEMV kernels, and low-level CLI tools are fully mature and production-ready (`v1.0.0`), the framework's higher-level evolutionary capabilities—including **`HKTrainer`**, the **`SelfTrainingPipeline`**, **`SelfPlayEngine` (SPIN)**, **dynamic Net2Net growth routines**, and the **in-container Appendix evolution DAG**—are **active research prototypes currently undergoing heavy development**. Their APIs, interfaces, and heuristics are experimental and actively evolving.
 
 ---
 
 ## Core Pillars & Highlights
 
-### 1. Foundational Raw Weight Storage & Super-Coalesced Multi-Device Architecture
+### 1. Autonomous Dynamic Architecture Growth (Net2Net + GrowthGovernor)
+- **Function-Preserving Net2WiderNet**: Dynamically widens feed-forward intermediate dimensions, attention projection layers, and SwiGLU MLPs (`net2wider_swiglu`) during runtime or fine-tuning while mathematically preserving exact outputs ($f_{\text{new}}(x) = f_{\text{old}}(x)$ on Day 0 with **$0.000000$ deviation**).
+- **Function-Preserving Net2DeeperNet**: Inserts identity-initialized modular residual blocks (`ModularResidualBlock`) and adapter layers into transformer stacks, expanding representational depth without perturbing existing forward activations.
+- **Dynamic Vocabulary Growth (`expand_vocab`, `hk_expand_vocab`)**: Expands token embeddings for domain-specific vocabularies or programming syntax on-the-fly with Gaussian initialization while preserving 100% of pre-existing token weights and IDs.
+- **Native Zig Hardware `GrowthGovernor`**: Hardware resource manager implemented in compiled native Zig (`hk_governor_can_grow_batch`). Evaluates **50,000 capacity constraints in 3.57 ms** (2.2× faster than Python), strictly bounding parameter expansions against available physical VRAM and system memory to prevent out-of-memory crashes before allocation.
+
+### 2. Full-Featured Training & Fine-Tuning Engine (`HKTrainer`)
+- **Unified Training Loop (`HKTrainer`, `HKTrainingArguments`)**: Hugging Face-compatible training interface integrating AdamW optimization, cosine learning rate schedules, linear warmup, gradient clipping, and automated checkpointing.
+- **Native QLoRA Adapter Fine-Tuning**: Low-rank adaptation (`enable_qlora`, `lora_rank`, `lora_alpha`) attached directly to quantized or unquantized projection matrices with zero external library dependencies.
+- **Plateau-Triggered Dynamic Growth**: Continuously monitors validation loss stagnation; when learning plateaus beyond `growth_patience`, `HKTrainer` automatically invokes Net2Net widening to inject new capacity and break through convergence barriers.
+- **Plasticity Isolation (`protect_base_capacity`)**: Anti-catastrophic forgetting gradient shielding masks (`hk_init_plasticity_mask`, row/col gradient masking) that freeze or dampen gradient flow to pre-existing base units while channeling learning updates exclusively into newly expanded neurons.
+- **In-Container Checkpointing**: Stores training checkpoints, optimizer states, learning rates, and step metrics directly inside the `.hk` container.
+
+### 3. Closed-Loop Autonomous Self-Learning & Self-Play Pipeline
+- **End-to-End Self-Training Pipeline (`SelfTrainingPipeline`)**: Orchestrates closed-loop continuous model improvement without human supervision or manual labeling.
+- **Bottleneck Diagnosis (`ExpansionEvaluator`)**: Probes representation deficits, domain error rates, and missing vocabulary tokens across task curricula to formulate precise architectural growth plans.
+- **Inner Monologue Generation (`SelfConversationalEngine`)**: Employs dual-agent self-dialogue between Proposer and Thinker agents, generating structured reasoning traces (`<think> ... </think>`) before synthesizing candidate code or solutions.
+- **Self-Play Fine-Tuning (`SelfPlayEngine` & `SPINLoss`)**: Leverages Self-Play Fine-Tuning (SPIN) objectives to contrast candidate responses against previous generations, iteratively self-correcting and bootstrapping reasoning depth.
+- **Isolated Sandbox Verification (`CodeSandbox`, `SandboxExecutor`)**: Executes candidate implementations in a secure, sandboxed execution environment with strict memory/timeout limits. Only verifiably passing solutions provide positive reinforcement gradients.
+
+### 4. Cryptographic In-Container Version Lineage & Instant Rollback (Appendix Region)
+- **Embedded Version DAG (`header.appendix_offset`)**: Persistent append-only audit log residing at the end of the `.hk` file storing LoRA adapter deltas, training loss history, validation accuracy, sandbox pass rates, and growth receipts.
+- **Cryptographic SHA-256 Parent Hash Chaining**: Every adaptation generation links cryptographically to its parent container state, guaranteeing tamper-proof audit trails.
+- **Single-Command Instant Rollback (`hk rollback` / `hk_appendix_rollback`)**: Instantly rollback a model to any prior generation in sub-milliseconds without modifying or re-saving base weights.
+
+### 5. Foundational Raw Weight Storage & Super-Coalesced Multi-Device Architecture
 - **Zero-Compute Headroom Raw Storage**: Stores unquantized IEEE `FP32`, `FP16`, `BF16`, `FP8`, `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, `UINT16`, `UINT32`, `UINT64`, and `F64` weights as contiguous bit representations with **0 decoding, dequantization, or transcoding latency**. Compute kernels execute directly on mmap pointers via SIMD/Tensor Core vector instructions.
 - **Universal Super-Coalescing Across Heterogeneous Silicon**:
   - **NVIDIA GPUs**: 128-byte alignment for warp-coalesced memory transactions and Tensor Core tile loads.
@@ -42,28 +89,27 @@ HK is architected around two complementary operating modes sharing the same high
   - `SHARED_REF`: Deduplicates tied embeddings (e.g., `lm_head.weight` == `embed_tokens.weight`) and recursive layer weights on disk, saving gigabytes of redundant full-precision storage.
   - `NULL_REF`: Represents fully pruned or zeroed layers with zero physical bytes stored in the container.
 
-### 2. Split Mode Sharding & Regeneratable Modular Weights
+### 6. Split Mode Sharding & Regeneratable Modular Weights
 - **Multi-File Sharding (`HeaderFlags.IS_SHARDED = 0x40`)**: Splits multi-hundred-gigabyte raw checkpoints cleanly across storage boundaries with standardized manifest indexes (`model.hk.index.json`), allowing lazy cross-shard slice access.
 - **Regeneratable Weights & Dynamic Modularity**: Sharding works seamlessly in raw storage mode, allowing individual layers, LoRA adapters, and delta patches to be attached, detached, or regenerated dynamically without modifying base weights.
-- **Appendix Version Lineage & Instant Rollback**: Append LoRA adapters, delta patches, and evaluation benchmarks directly to `.hk` files with cryptographic parent hash chaining and single-command rollback (`hk_appendix_rollback`).
 
-### 3. Lossless Structural Sparsity without Quantization
+### 7. Lossless Structural Sparsity without Quantization
 - **NVIDIA Ampere / Hopper / Blackwell 2:4 Structured Sparsity**: Stores 2 non-zero elements per 4-element block with physical 2-bit nibble metadata packing. Cuts physical on-disk storage and memory bandwidth by **50% (1.88× physical compression)** while preserving **exact 16-bit floating point precision** and dynamic range ($0.000000$ error vs dense baseline).
 - **Compressed Sparse Representations**: Bitmask, Compressed Sparse Row (CSR), and Block Sparse Row (BSR) encoding zero out pruned connections without quantization distortion, streaming directly into native SIMD unpacking kernels at $>2.5\text{ GB/s}$.
 - **Physical Channel Pruning**: Structurally drops unneeded attention heads or MLP channels from the tensor layout with explicit dimension mapping, reducing FLOPs and parameter footprint simultaneously.
 
-### 4. Cache-Optimized 2D Tiling for Full-Precision GEMM/GEMV
+### 8. Cache-Optimized 2D Tiling for Full-Precision GEMM/GEMV
 - **Tensor-Core-Aligned Tiling (`TileLayout`)**: Reorganizes 2D/nD weight matrices into 16×16, 32×16, and 64×64 cacheline-aligned tiles with contiguous inner-K dimension packing to eliminate cache line thrashing and shared memory bank conflicts.
 
-### 5. Microsecond In-Place Metadata Editing
+### 9. Microsecond In-Place Metadata Editing
 - **Microsecond In-Place Metadata Patching (`hk metadata set`)**: Updates tokenizer configs, chat templates, hyperparameter tags, and licenses directly in the file header without re-serializing multi-gigabyte weight tensors.
 
-### 6. Native Zig-First High-Performance Engine
+### 10. Native Zig-First High-Performance Engine
 - **Ultra-Lightweight Footprint**: The standalone native Zig binary (`hk.exe`) idles at just **2.80 MB of RAM** (>98% less memory than Python/PyTorch) and starts in **53 ms** (90.4× faster).
 - **Zero-Copy Context Management**: Dynamic context window truncation executes in **14.3 µs** on 65k contiguous token buffers (13.4× faster than Python).
 - **Hardware-Adaptive Inference**: Native CPUSpecs detection tailors vector paths to AVX2, AVX-512 VNNI, AMX-TILE, ARM NEON, or Apple Metal dynamically.
 
-### 7. Comprehensive Quantization Suite (Complementary for Edge Deployments)
+### 11. Comprehensive Quantization Suite (Complementary for Edge Deployments)
 While HK is fundamentally designed for non-quantized storage and access performance, it provides a full suite of quantization schemes when low-bit compression is needed:
 - **Dual-Mode Quantization**: Decouples compact base weights (NF4, DQ8, BitNet ternary) from residual delta streams, enabling runtime recovery of full floating-point fidelity ($>0.99999$ cosine similarity) without reloading weights.
 - **Super-Block K-Quants ($Q2\_K$ through $Q8\_K$)**: 256-element super-blocks with sub-block scaling factors matching GGUF precision parity.
@@ -101,54 +147,179 @@ zig build test
 
 ---
 
-### 2. Python API: Raw Weight Storage & Zero-Copy Access
+### 2. Training with `HKTrainer` (Experimental Prototype Preview)
+
+> [!TIP]
+> `HKTrainer` and the adaptive Net2Net training features are currently in early prototype preview and undergoing active research.
+
+Train or fine-tune neural models using HK's unified trainer with automatic plateau-triggered Net2Net capacity growth:
+
+```python
+import torch
+from hk import HKConfig, HKForCausalLM
+from hk.trainer import HKTrainer, HKTrainingArguments
+
+# 1. Initialize model
+config = HKConfig(vocab_size=32000, hidden_size=1024, intermediate_size=2816, num_hidden_layers=12)
+model = HKForCausalLM(config)
+
+# 2. Configure training with QLoRA & adaptive Net2Net growth
+args = HKTrainingArguments(
+    output_dir="./checkpoints",
+    learning_rate=3e-4,
+    batch_size=4,
+    num_train_epochs=3,
+    # QLoRA parameter-efficient fine-tuning
+    use_qlora=True,
+    lora_rank=8,
+    lora_alpha=16.0,
+    # Adaptive capacity growth: widens layer dimensions when loss stagnates for 5 steps
+    enable_adaptive_growth=True,
+    growth_patience=5,
+    growth_width_factor=1.25,
+    # Hardware cacheline alignment
+    alignment=128,
+)
+
+# 3. Launch training
+trainer = HKTrainer(
+    model=model,
+    args=args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+)
+trainer.train()
+
+# 4. Save evolved model with cryptographic Appendix lineage
+model.save_pretrained("./checkpoints/evolved_model.hk")
+```
+
+---
+
+### 3. Dynamic Architecture Growth (SwiGLU Net2WiderNet & Hardware GrowthGovernor)
+
+Expand model capacity on-the-fly while strictly bounding memory against hardware VRAM:
+
+```python
+import torch
+from hk.adaptive.growth import GrowthGovernor, net2wider_swiglu
+
+# 1. Initialize hardware-bounded GrowthGovernor
+# Uses native Zig engine to evaluate hardware capacity in microseconds
+gov = GrowthGovernor(max_vram_mb=8192, max_growth_ratio=2.0)
+
+current_params = 135_000_000
+additional_params = 35_000_000
+
+# 2. Validate proposed expansion against hardware limits
+allowed, reason = gov.can_grow(current_params, additional_params, dtype_bytes=2)
+print(f"Growth Approved: {allowed} ({reason})")
+
+if allowed:
+    # 3. Apply function-preserving SwiGLU Net2WiderNet expansion
+    # Expands intermediate dimension from 1536 to 2048
+    mlp = model.model.layers[0].mlp
+    wider_gate, wider_up, wider_down = net2wider_swiglu(
+        mlp.gate_proj,
+        mlp.up_proj,
+        mlp.down_proj,
+        new_intermediate_size=2048,
+        noise_std=0.0,  # 0.0 guarantees exact Day-0 mathematical function preservation
+    )
+    mlp.gate_proj, mlp.up_proj, mlp.down_proj = wider_gate, wider_up, wider_down
+    print("SwiGLU MLP successfully expanded with 0.000000 deviation from baseline!")
+```
+
+---
+
+### 4. Closed-Loop Autonomous Self-Training Pipeline
+
+Coordinate self-conversational reasoning, dynamic expansion, and sandboxed code verification:
+
+```python
+from hk.adaptive import (
+    SelfTrainingPipeline,
+    SelfTrainingCurriculum,
+    SelfConversationalEngine,
+    CodeSandbox,
+    GrowthGovernor,
+)
+
+# 1. Define target curriculum with syntax and diagnostic tasks
+curriculum = SelfTrainingCurriculum(
+    domain_name="SystemsProgramming",
+    target_language="Zig",
+    syntax_keywords=["fn", "defer", "errdefer", "comptime", "pub", "anytype"],
+    diagnostic_tasks=[...],
+    training_tasks=[...],
+)
+
+# 2. Initialize pipeline with secure code sandbox
+sandbox = CodeSandbox(timeout_sec=2.0)
+engine = SelfConversationalEngine(sandbox=sandbox)
+pipeline = SelfTrainingPipeline(
+    model=model,
+    hk_file_path="models/minizig_model.hk",
+    governor=GrowthGovernor(max_vram_mb=6144),
+    conversational_engine=engine,
+    rehearsal_ratio=0.10,  # Anti-catastrophic forgetting rehearsal
+)
+
+# 3. Run autonomous self-training generation
+report = pipeline.train_generation(curriculum, generation_idx=1)
+print(f"Gen 1 Complete: Pass Rate={report.pass_rate*100:.1f}%, Expansion={report.expansion_occurred}")
+```
+
+---
+
+### 5. In-Container Version Lineage & Cryptographic Rollback
+
+Manage version DAGs directly inside `.hk` files without duplicating base weights:
+
+```python
+from hk.adaptive.appendix import AppendixManager
+
+# 1. Inspect version lineage
+manager = AppendixManager("model.hk")
+records = manager.list_records()
+for r in records:
+    print(f"Generation {r.generation} [{r.name}]: Loss={r.metrics.loss:.4f}, PassRate={r.metrics.pass_rate*100:.1f}%")
+
+# 2. Rollback to Generation 1 instantly
+success = manager.rollback_to_generation(target_generation=1)
+print(f"Rollback successful: {success}")
+```
+
+---
+
+### 6. Raw Weight Storage & Instant Zero-Copy Inference
+
+Store raw unquantized weights with zero compute headroom and super-coalesced alignment:
 
 ```python
 import torch
 import hk
 
-# 1. First-Class Raw Weight Storage (Zero Decoding Headroom)
-# Stores raw unquantized IEEE weights (BF16, FP16, FP32, INT8) with super-coalesced alignment
+# 1. Save unquantized IEEE raw weights with universal super-coalescing
 weights = {
     "model.layers.0.mlp.gate_proj.weight": torch.randn(2048, 4096, dtype=torch.bfloat16),
     "model.layers.0.mlp.up_proj.weight": torch.randn(2048, 4096, dtype=torch.bfloat16),
 }
 hk.save_raw(weights, "model_raw.hk", universal_alignment=True)
 
-# 2. Instant Zero-Copy Memory-Mapped Store
+# 2. Instant zero-copy memory-mapped store
 store = hk.load_raw("model_raw.hk")
-print(f"Is Raw Storage: {store.is_raw_storage}")
-print(f"Is Universal Page Aligned: {store.is_universal_page_aligned}")
-print(f"Is Tensor Core Aligned: {store.is_tensor_core_aligned}")
+print(f"Universal Page Aligned (4KB): {store.is_universal_page_aligned}")
+print(f"Tensor Core Aligned (128B) : {store.is_tensor_core_aligned}")
 
-# Zero-copy tensor slice access directly from mapped storage
-w_gate = store["model.layers.0.mlp.gate_proj.weight"]
-print(f"Loaded tensor: shape={w_gate.shape}, dtype={w_gate.dtype}")
-
-# 3. Direct Native Linear Algebra (Zero Prior Allocation)
+# 3. Direct SIMD Linear Algebra (zero prior memory allocation)
 x = torch.randn(4096, dtype=torch.float32)
 y = store.gemv("model.layers.0.mlp.gate_proj.weight", x)
-
-# 4. Multi-Device Hardware Optimization Exporters
-# Optimizes alignment for target device while maintaining 100% NVIDIA Tensor Core compatibility
-hk.to_amd_rocm("model_raw.hk", "model_amd.hk")       # 4KB aligned for ROCm DirectGMA
-hk.to_intel_npu("model_raw.hk", "model_intel.hk")    # 4KB aligned for OpenVINO Direct DMA
-hk.to_apple_metal("model_raw.hk", "model_metal.hk")  # 16KB aligned for Metal zero-copy
-hk.to_nvidia_tensor_core("model_raw.hk", "model_nv.hk")
-
-# 5. Split Mode Sharding with Raw Weights (Regeneratable Weights / LoRA)
-hk.save_sharded_raw(weights, "shards/", max_shard_size="2GB")
-sharded_store = hk.load_sharded_raw("shards/model.hk.index.json")
-
-# 6. Complementary Quantization & Transcoding (When Edge Compression is Needed)
-from hk import convert_gguf_to_hk, export_hk_to_gguf
-convert_gguf_to_hk("model.Q4_K_M.gguf", "model.hk")
-export_hk_to_gguf("model.hk", "exported.gguf")
 ```
 
 ---
 
-### 3. Native Standalone CLI & Developer Tools
+## Native Standalone CLI & Developer Tools
 
 The compiled native `hk` CLI provides sub-millisecond execution with minimal memory usage:
 
@@ -159,54 +330,56 @@ hk hardware-profile
 # 2. Inspect container header, alignment audit, and non-quantized tensor layouts
 hk inspect model.hk
 
-# 3. Comprehensive binary dumper (hex header breakdown, flags, memory offsets)
-hk dump model.hk
-
-# 4. Verify 128-byte Tensor Core alignment and container checksums
+# 3. Verify 128-byte Tensor Core alignment, checksums, and container integrity
 hk verify model.hk
 
-# 5. In-place metadata patching without rewriting multi-gigabyte weight arrays
+# 4. In-place metadata patching without rewriting multi-gigabyte weight arrays
 hk metadata set model.hk general.version "1.0.0"
 hk metadata set model.hk tokenizer.chat_template "{% for message in messages %}..."
 
-# 6. Lossless GGUF / SafeTensors transcoding
+# 5. Native vocabulary and SwiGLU MLP width expansion (Net2WiderNet)
+hk expand in.hk out.hk --vocab 32000 --width 1.33
+
+# 6. Physical memory traversal, page fault profiling & resident dequantization
+hk benchmark model.hk
+
+# 7. List in-container Appendix version lineage records
+hk appendix list model.hk
+
+# 8. Cryptographic generational rollback to previous model state
+hk rollback model.hk --generation 1
+
+# 9. Lossless GGUF / SafeTensors transcoding
 hk convert-gguf model.gguf model.hk
 hk export -f safetensors model.hk model.safetensors
 hk export -f gguf model.hk exported.gguf
 
-# 7. Native vocabulary and SwiGLU MLP width expansion (Net2WiderNet)
-hk expand in.hk out.hk --vocab 32000 --width 1.33
-
-# 8. Launch visual HK Model Studio GUI
+# 10. Launch visual HK Model Studio GUI
 hk gui model.hk
-# Or via Python:
-hk-gui model.hk
-
-# 9. Cryptographic hash verification (streaming SHA-256)
-hk hash model.hk
 ```
 
 ---
 
 ## Architectural Comparison
 
-| Feature | SafeTensors | GGUF | HK Framework |
+| Feature | SafeTensors | GGUF | HK Neural Framework |
 |:---|:---|:---|:---|
-| **Primary Architecture** | JSON-header float serialization | CPU-first quantized inference | **Unified high-performance container for raw non-quantized & quantized execution** |
+| **Primary Paradigm** | Static weight serialization | Static quantized inference | **Living neural framework: Training, Dynamic Growth, Self-Play & Storage** |
+| **Unified Training Engine** | None (external PyTorch/HF) | None | **Native `HKTrainer` with automated plateau-triggered Net2Net expansion** |
+| **Dynamic Architecture Growth** | Impossible | Impossible | **Live Net2WiderNet (Linear & SwiGLU), Net2DeeperNet, Dynamic Vocab Growth** |
+| **Hardware Growth Safety** | None (OOM crashes) | None | **Native Zig `GrowthGovernor` (50k constraints evaluated in 3.57 ms)** |
+| **Autonomous Self-Learning** | None | None | **Closed-loop `SelfTrainingPipeline`, SPIN loss, `<think>` inner monologue** |
+| **Execution Sandboxing** | None | None | **Integrated `CodeSandbox` for automated test-driven reward verification** |
+| **Catastrophic Forgetting Defense** | None | None | **Plasticity Isolation gradient shielding masks (`protect_base_capacity`)** |
+| **Version Lineage & Provenance** | None (requires external Git LFS) | None | **In-container Appendix DAG with SHA-256 parent hash chaining & rollback** |
 | **Raw Unquantized Weights** | Basic unaligned byte blobs | Inefficient fallback | **First-class IEEE/INT raw storage with 0 compute headroom (no decode penalty)** |
 | **Multi-Device DMA Zero-Copy** | None | 32-byte CPU alignment | **Super-Coalesced: 4KB AMD/Intel + 16KB Apple Metal + 128B NVIDIA in one file** |
-| **Non-Quantized Storage** | Dense unaligned arrays | Dense floats with 32B alignment | **Hardware-aligned (64B/128B/4096B/16KB) zero-copy memory mapping** |
-| **Container Header Overhead** | Multi-megabyte JSON text string | Variable-length string KV array | **Fixed 128-byte binary header + 128-byte TOC entries (<0.001% overhead)** |
-| **Zero-Allocation Deduplication** | None (duplicate arrays saved) | None | **`SHARED_REF` (tied embeddings) & `NULL_REF` (0-byte pruned layers)** |
-| **Structured Hardware Sparsity** | No support | No support | **Native Ampere 2:4 (nibble indices, 1.88× lossless physical compression)** |
+| **Structured Hardware Sparsity** | No support | No support | **Native Ampere 2:4 (nibble indices, 1.88× physical reduction, 0.000000 error)** |
 | **2D Tensor Tiling** | Row-major only | CPU strided only | **Tensor-Core-aligned K-contiguous tiles (16×16, 32×16, 64×64 WMMA)** |
-| **In-Place Metadata Updates** | Impossible (requires rewrite) | Requires container rewrite | **Microsecond in-place header patching (`hk metadata set`)** |
-| **Quantization Coverage** | None (dense floats only) | Lossy K/I-quants only | **Comprehensive: Dual-Mode (NF4 + residual recovery), K-Quants, I-Quants, MXFP4, NVFP4, BitNet** |
-| **Model Architectures** | External dependency | 137 fixed architectures | **137+ native architectures with compiled bidirectional mapping (320k names/sec)** |
+| **In-Place Metadata Updates** | Requires full file rewrite | Requires container rewrite | **Microsecond in-place header patching (`hk metadata set`)** |
+| **Quantization Coverage** | None (dense floats only) | Lossy K/I-quants only | **Comprehensive: Dual-Mode (NF4 + residual), K-Quants, I-Quants, MXFP4, NVFP4** |
 | **Process Idle RAM** | ~197 MB (PyTorch runtime) | Variable C++ | **2.80 MB (Standalone native Zig `hk.exe`)** |
 | **Startup Latency** | ~4,880 ms (Python runtime) | ~120 ms | **53.98 ms (Standalone native Zig `hk.exe`)** |
-| **Multi-Stage Pipelines** | None | None | **Heterogeneous DAGs (Whisper STT + DistilBERT + Causal LLM)** |
-| **Live Dynamic Expansion** | Impossible | Impossible | **Live Net2WiderNet (Linear & SwiGLU), Net2DeeperNet, Vocab expansion** |
 
 ---
 
@@ -229,8 +402,36 @@ Evaluated against a real production non-quantized model with **873,438,784 bfloa
 
 ---
 
-### 2. Non-Quantized Loading & Memory-Mapped Slicing (HK vs SafeTensors)
-Evaluated across 32 dense full-precision tensors (224.00 MB FP32) with 50 iterations per operation:
+### 2. Memory-Mapped Loading & Physical Page-In vs. Resident Dequantization
+Transparently isolating virtual memory descriptor mapping, physical storage paging, and pure in-memory SIMD compute:
+
+| Loader / Compute Phase | Metric Reported | Measured Latency / Rate | Physical Significance |
+| :--- | :--- | :--- | :--- |
+| **Zero-Copy Header & Deserialization** | Metadata & Virtual Map | **15.93 ms** (1.75 GB model) | Maps file into user address space (`mmap`/`MapViewOfFile`). |
+| **Lazy Slice Pointer Resolution** | Descriptor Lookup | **23.70 $\mu$s** (20.6 M-slices/s) | Resolves 488 tensor descriptors in user space (0 heap allocations). |
+| **Physical Memory Traversal (First Touch)** | NVMe / Storage Throughput | **2,422 ms** (687.8 MB/s) | Actually reads mapped pages via 256-bit SIMD, faulting them into RAM. |
+| **Physical Memory Traversal (Warm Cache)**| System Memory Bus Rate | **1,409 ms** (1,182.3 MB/s) | Pure memory bus streaming throughput when pages are resident in RAM. |
+| **Reconstruction & Dequantization** | SIMD Compute Throughput | **213.25 M-elem/s** (970 MB scratch)| Executes on warm resident memory using single-tensor scratch buffers. |
+
+> [!NOTE]
+> **Benchmarking Rigor**: HK explicitly distinguishes between **lazy pointer slice resolution** (sub-microsecond virtual address setup where memory is not yet paged in) and **physical first-touch traversal** (where SIMD reads force OS page faults from disk into RAM). Furthermore, HK's dequantization benchmarks use a reusable per-tensor scratch buffer (sized to the largest single tensor, e.g. 50–970 MB) rather than eagerly allocating multi-gigabyte monolithic arrays, eliminating artificial OS memory zeroing and swap thrashing.
+
+---
+
+### 3. Autonomous Growth Governor & Adaptive Decision Latency
+Evaluating hardware boundary safety constraints across 50,000 proposed layer/width capacity expansions:
+
+| Evaluation Engine | Operations Evaluated | Total Latency | Rate | Relative Performance |
+| :--- | :---: | :---: | :---: | :---: |
+| **Python Standard Logic** | 50,000 checks | 7.89 ms | 6.34 M-evals/sec | 1.00x |
+| **HK Native Zig Vectorized Governor** | 50,000 checks | **3.57 ms** | **14.01 M-evals/sec** | **2.21× faster** |
+
+- **Zero OOM Tolerance**: The native growth governor evaluates candidate expansions in **71 nanoseconds per decision**, allowing automated training loops to continuously probe expansion feasibility without introducing overhead.
+
+---
+
+### 4. Non-Quantized Loading & Memory-Mapped Slicing (HK vs SafeTensors)
+Evaluated across 32 dense full-precision FP32 tensors (224.00 MB total container size) with 50 iterations per operation:
 
 | Reader / Loader Access Pattern | Container Size | Operation | Latency (ms) | Relative Performance |
 |:---|:---:|:---|:---:|:---:|
@@ -241,24 +442,19 @@ Evaluated across 32 dense full-precision tensors (224.00 MB FP32) with 50 iterat
 | **SafeTensors (`safe_open` lifecycle)** | 224.00 MB | Open + Slice Context | 0.332 ms | 1.00x |
 | **HK Native (`safe_open` lifecycle)** | 224.00 MB | Open + Slice Context | **0.274 ms** | **1.21× faster** |
 
-- **Sub-10 Microsecond Slicing**: Direct tensor slicing in `safe_open` executes in **9.2 microseconds** per slice (1.62× faster than SafeTensors) by calculating strided offsets directly on the memory map without copying unrequested bytes.
-- **Full Model Load**: Full model dictionary loading runs in **0.797 ms** (1.85× faster than SafeTensors) thanks to 128-byte hardware cache-line alignment and zero-copy memory mapping.
-
 ---
 
-### 3. Lossless NVIDIA Ampere 2:4 Structured Sparsity
+### 5. Lossless NVIDIA Ampere 2:4 Structured Sparsity
 Bit-exact hardware physical nibble compression without numerical precision loss:
 
 | Operation | Input Size | Output Size | Compression | Latency (ms) | Throughput (MB/s) | Max Absolute Error |
-|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+|:---|:---:|:---|:---:|:---:|:---:|:---:|
 | **Ampere 2:4 Pack** | 64.00 MB | 34.00 MB | **1.88x** | 89.90 ms | 711.9 MB/s | **0.000000 (Exact Lossless)** |
 | **Ampere 2:4 Unpack** | 34.00 MB | 64.00 MB | 1.00x | **24.87 ms** | **2,573.0 MB/s** | **0.000000 (Exact Lossless)** |
 
-- **Lossless Storage Reduction**: Achieves a 1.88× physical storage reduction while maintaining a **1.000000 cosine similarity** and zero deviation from full IEEE floating-point precision.
-
 ---
 
-### 4. Native Zig CLI & Process Footprint
+### 6. Native Zig CLI & Process Footprint
 Comparing process initialization and idle memory between Python/PyTorch and the native `hk.exe` binary:
 
 | Metric | Python Runtime (Torch + HK) | Standalone Zig Binary (`hk.exe`) | Improvement / Delta |
@@ -267,15 +463,14 @@ Comparing process initialization and idle memory between Python/PyTorch and the 
 | **Process Startup Latency** | 4,880.72 ms | **53.98 ms** | **90.4× faster startup** |
 | **HF Tensor Name Mapping Rate** | 12,400 names/sec | **320,944 names/sec** | **25.8× faster** |
 | **65k Context Truncation** | 191.82 µs | **14.30 µs** | **13.4× faster** |
-| **Growth Governor (50k Checks)** | 7.89 ms | **3.57 ms (Batched)** | **2.2× faster** |
 
 ---
 
-### 5. Quantization Benchmarks (Complementary Deployment)
+### 7. Quantization Benchmarks (Complementary Edge Schemes)
 Evaluated on a 2048 x 2048 matrix (4,194,304 f32 elements / 16.00 MB) with AVX2 SIMD acceleration:
 
 | Quant Format | Packed Size | Compression | Quant Latency | Quant Throughput | Dequant Latency | Dequant Throughput | Cosine Sim |
-|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+|:---|:---:|:---|:---:|:---:|:---:|:---:|:---:|
 | **Q8_0 (8-bit Symmetric)** | 4.25 MB | 3.76x | 6.4 ms | 2,489.8 MB/s | **2.4 ms** | **6,688.5 MB/s** | 0.999985 |
 | **Q4_0 (4-bit Symmetric)** | 2.25 MB | 7.11x | 6.7 ms | 2,372.8 MB/s | **3.4 ms** | **4,667.7 MB/s** | 0.996318 |
 | **Q8_K (8-bit K-Quant)** | 4.56 MB | 3.51x | 5.9 ms | 2,718.0 MB/s | **4.7 ms** | **3,396.6 MB/s** | 0.999975 |
@@ -288,7 +483,7 @@ Evaluated on a 2048 x 2048 matrix (4,194,304 f32 elements / 16.00 MB) with AVX2 
 
 HK provides native, zero-overhead bindings across all major environments:
 
-- **Python**: [`python/hk/`](python/hk/) - Hugging Face-style drop-in API with PyTorch, NumPy, JAX, and Flax bindings.
+- **Python**: [`python/hk/`](python/hk/) - Unified framework with PyTorch, NumPy, JAX, Flax, `HKTrainer`, and `SelfTrainingPipeline`.
 - **Rust**: [`bindings/rust/`](bindings/rust/) - Safe idiomatic Rust crate (`Cargo.toml`).
 - **TypeScript / Node.js**: [`bindings/js/`](bindings/js/) - Zero-dependency browser, Node.js, and WASM SDK (`@hk-format/core`).
 - **C# / .NET**: [`bindings/csharp/`](bindings/csharp/) - Modern .NET package for Unity, Windows, and enterprise systems (`Hk.csproj`).
@@ -301,3 +496,4 @@ HK provides native, zero-overhead bindings across all major environments:
 ## License
 
 HK is open source software licensed under the [Apache License, Version 2.0](LICENSE).
+

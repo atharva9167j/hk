@@ -47,7 +47,22 @@ Comparing process initialization, runtime overhead, and working set RAM between 
 
 ---
 
-## 4. Full-Precision & Packed SIMD GEMV Kernel Throughput
+## 4. Physical Memory-Mapped First-Touch Page-In vs. Resident Dequantization
+Transparently isolating virtual memory descriptor mapping, physical storage page faults, and pure in-memory SIMD compute:
+
+| Loader / Compute Phase | Metric Reported | Measured Latency / Rate | Physical Significance |
+| :--- | :--- | :--- | :--- |
+| **Zero-Copy Header & Deserialization** | Metadata & Virtual Map | **15.93 ms** (1.75 GB model) | Maps file into user address space (`mmap`/`MapViewOfFile`). |
+| **Lazy Slice Pointer Resolution** | Descriptor Lookup | **23.70 $\mu$s** (20.6 M-slices/s) | Resolves 488 tensor descriptors in user space (0 heap allocations). |
+| **Physical Memory Traversal (First Touch)** | NVMe / Storage Throughput | **2,422 ms** (687.8 MB/s) | Actually reads mapped pages via 256-bit SIMD, faulting them into RAM. |
+| **Physical Memory Traversal (Warm Cache)**| System Memory Bus Rate | **1,409 ms** (1,182.3 MB/s) | Pure memory bus streaming throughput when pages are resident in RAM. |
+| **Reconstruction & Dequantization** | SIMD Compute Throughput | **213.25 M-elem/s** (970 MB scratch)| Executes on warm resident memory using single-tensor scratch buffers. |
+
+> **Rigor & Memory Safety**: HK explicitly distinguishes between **lazy pointer slice resolution** (sub-microsecond virtual address setup where memory is not yet paged in) and **physical first-touch traversal** (where SIMD reads force OS page faults from disk into RAM). Furthermore, HK's dequantization benchmarks use a reusable per-tensor scratch buffer (sized to the largest single tensor, e.g. 50–970 MB) rather than eagerly allocating multi-gigabyte monolithic arrays, eliminating artificial OS memory zeroing and swap thrashing.
+
+---
+
+## 5. Full-Precision & Packed SIMD GEMV Kernel Throughput
 Single-vector matrix-vector multiplication ($M=4096, K=4096$, 33.55 MFLOP per vector) with persistent atomic worker dispatch:
 
 | Kernel Engine / Precision   | Weight RAM | Latency (ms) | Throughput (GFLOPS) | Speedup vs PyTorch |
@@ -60,13 +75,13 @@ Single-vector matrix-vector multiplication ($M=4096, K=4096$, 33.55 MFLOP per ve
 
 ---
 
-## 5. High-Throughput Token Processing & Architecture Remapping
+## 6. High-Throughput Token Processing & Architecture Remapping
 - **Native BPE Tokenizer Throughput**: **3,370,876 tokens/sec** encoding throughput (4,501.7 KB/s) and **5,046,150 tokens/sec** decoding throughput (6,738.9 KB/s).
 - **Hugging Face Architecture Mapper**: Translates Hugging Face tensor keys to canonical HK format across 137+ architectures at **320,944 names/sec**.
 
 ---
 
-## 6. Full-Tensor SIMD Quantization & Dequantization (Complementary Edge Schemes)
+## 7. Full-Tensor SIMD Quantization & Dequantization (Complementary Edge Schemes)
 Evaluated on a 4096 x 4096 weight matrix (16,777,216 elements / 67.11 MB FP32):
 
 | Quant Format           | Packed Size | Compression | Quant Latency | Quant Throughput | Dequant Latency | Dequant Throughput | RMSE    | Cosine Sim |
