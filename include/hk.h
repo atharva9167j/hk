@@ -119,6 +119,7 @@ HK_API void hk_close(hk_reader_t* reader);
 // Tensor Access
 HK_API uint64_t hk_get_tensor_count(const hk_reader_t* reader);
 HK_API int hk_get_tensor_info(const hk_reader_t* reader, uint64_t index, hk_tensor_info_t* out_info);
+HK_API uint64_t hk_get_all_tensor_infos(const hk_reader_t* reader, hk_tensor_info_t* out_infos, uint64_t max_count);
 HK_API const void* hk_get_tensor_data(const hk_reader_t* reader, uint64_t index, uint64_t* out_size);
 HK_API const void* hk_get_tensor_residual(const hk_reader_t* reader, uint64_t index, uint64_t* out_size);
 HK_API const void* hk_get_tensor_scales(const hk_reader_t* reader, uint64_t index, uint64_t* out_size);
@@ -242,6 +243,32 @@ HK_API void hk_fused_gemv_dq8(
     uint64_t M,
     uint64_t K,
     uint32_t block_size
+);
+
+HK_API void hk_gemv_bf16(
+    const uint16_t* W_bf16,
+    const float* x,
+    const float* bias,
+    float* y,
+    size_t M,
+    size_t K
+);
+HK_API void hk_gemv_f16(
+    const void* W_f16,
+    const float* x,
+    const float* bias,
+    float* y,
+    size_t M,
+    size_t K
+);
+HK_API void hk_gemv_int8(
+    const int8_t* W_i8,
+    const float* x,
+    float scale_w,
+    const float* bias,
+    float* y,
+    size_t M,
+    size_t K
 );
 
 // Native Dynamic Architecture Growth (Net2Net)

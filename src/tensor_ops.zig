@@ -768,6 +768,88 @@ pub fn dotProductBF16(a: []const u16, b: []const f32) f32 {
     return sum;
 }
 
+fn gemvBF16_4rows(
+    w0: []const u16,
+    w1: []const u16,
+    w2: []const u16,
+    w3: []const u16,
+    x: []const f32,
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    b3: f32,
+    out: *[4]f32,
+) void {
+    const len = @min(@min(@min(w0.len, w1.len), @min(w2.len, w3.len)), x.len);
+    var i: usize = 0;
+
+    var acc0_0: @Vector(8, f32) = @splat(0.0);
+    var acc0_1: @Vector(8, f32) = @splat(0.0);
+    var acc1_0: @Vector(8, f32) = @splat(0.0);
+    var acc1_1: @Vector(8, f32) = @splat(0.0);
+    var acc2_0: @Vector(8, f32) = @splat(0.0);
+    var acc2_1: @Vector(8, f32) = @splat(0.0);
+    var acc3_0: @Vector(8, f32) = @splat(0.0);
+    var acc3_1: @Vector(8, f32) = @splat(0.0);
+
+    while (i + 16 <= len) : (i += 16) {
+        // Chunk 0 (8 elements)
+        const vx0: @Vector(8, f32) = x[i..][0..8].*;
+        const r0_0: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w0[i..][0..8].*) << @splat(16));
+        const r1_0: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w1[i..][0..8].*) << @splat(16));
+        const r2_0: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w2[i..][0..8].*) << @splat(16));
+        const r3_0: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w3[i..][0..8].*) << @splat(16));
+
+        acc0_0 += r0_0 * vx0;
+        acc1_0 += r1_0 * vx0;
+        acc2_0 += r2_0 * vx0;
+        acc3_0 += r3_0 * vx0;
+
+        // Chunk 1 (8 elements)
+        const vx1: @Vector(8, f32) = x[i + 8 ..][0..8].*;
+        const r0_1: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w0[i + 8 ..][0..8].*) << @splat(16));
+        const r1_1: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w1[i + 8 ..][0..8].*) << @splat(16));
+        const r2_1: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w2[i + 8 ..][0..8].*) << @splat(16));
+        const r3_1: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w3[i + 8 ..][0..8].*) << @splat(16));
+
+        acc0_1 += r0_1 * vx1;
+        acc1_1 += r1_1 * vx1;
+        acc2_1 += r2_1 * vx1;
+        acc3_1 += r3_1 * vx1;
+    }
+
+    var sum0 = @reduce(.Add, acc0_0 + acc0_1);
+    var sum1 = @reduce(.Add, acc1_0 + acc1_1);
+    var sum2 = @reduce(.Add, acc2_0 + acc2_1);
+    var sum3 = @reduce(.Add, acc3_0 + acc3_1);
+
+    while (i + 8 <= len) : (i += 8) {
+        const vx: @Vector(8, f32) = x[i..][0..8].*;
+        const r0: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w0[i..][0..8].*) << @splat(16));
+        const r1: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w1[i..][0..8].*) << @splat(16));
+        const r2: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w2[i..][0..8].*) << @splat(16));
+        const r3: @Vector(8, f32) = @bitCast(@as(@Vector(8, u32), w3[i..][0..8].*) << @splat(16));
+
+        sum0 += @reduce(.Add, r0 * vx);
+        sum1 += @reduce(.Add, r1 * vx);
+        sum2 += @reduce(.Add, r2 * vx);
+        sum3 += @reduce(.Add, r3 * vx);
+    }
+
+    while (i < len) : (i += 1) {
+        const xi = x[i];
+        sum0 += bf16ToF32(w0[i]) * xi;
+        sum1 += bf16ToF32(w1[i]) * xi;
+        sum2 += bf16ToF32(w2[i]) * xi;
+        sum3 += bf16ToF32(w3[i]) * xi;
+    }
+
+    out[0] = sum0 + b0;
+    out[1] = sum1 + b1;
+    out[2] = sum2 + b2;
+    out[3] = sum3 + b3;
+}
+
 /// Fast Matrix-Vector Multiplication for Raw BF16 Weights: y = W_bf16 * x + bias
 /// Direct zero-copy computation without prior dequantization or transcoding
 pub fn gemvBF16(
@@ -779,7 +861,27 @@ pub fn gemvBF16(
     K: usize,
 ) void {
     const safe_M = @min(M, y.len);
-    for (0..safe_M) |r| {
+    var r: usize = 0;
+    while (r + 4 <= safe_M and (r + 4) * K <= W_bf16.len) : (r += 4) {
+        const row0 = W_bf16[(r + 0) * K .. (r + 1) * K];
+        const row1 = W_bf16[(r + 1) * K .. (r + 2) * K];
+        const row2 = W_bf16[(r + 2) * K .. (r + 3) * K];
+        const row3 = W_bf16[(r + 3) * K .. (r + 4) * K];
+
+        const b0: f32 = if (bias) |b| (if (r + 0 < b.len) b[r + 0] else 0.0) else 0.0;
+        const b1: f32 = if (bias) |b| (if (r + 1 < b.len) b[r + 1] else 0.0) else 0.0;
+        const b2: f32 = if (bias) |b| (if (r + 2 < b.len) b[r + 2] else 0.0) else 0.0;
+        const b3: f32 = if (bias) |b| (if (r + 3 < b.len) b[r + 3] else 0.0) else 0.0;
+
+        var out: [4]f32 = undefined;
+        gemvBF16_4rows(row0, row1, row2, row3, x, b0, b1, b2, b3, &out);
+        y[r + 0] = out[0];
+        y[r + 1] = out[1];
+        y[r + 2] = out[2];
+        y[r + 3] = out[3];
+    }
+
+    while (r < safe_M) : (r += 1) {
         const row_start = r * K;
         const row_end = @min(row_start + K, W_bf16.len);
         if (row_start >= W_bf16.len) {

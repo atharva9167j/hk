@@ -100,6 +100,33 @@ pub export fn hk_get_tensor_info(reader_ptr: ?*const hk_reader_t, index: u64, ou
     return 0;
 }
 
+pub export fn hk_get_all_tensor_infos(reader_ptr: ?*const hk_reader_t, out_infos: ?[*]C_TensorInfo, max_count: u64) u64 {
+    if (reader_ptr == null or out_infos == null) return 0;
+    const wrapper: *const ReaderWrapper = @ptrCast(@alignCast(reader_ptr));
+    const total: u64 = @intCast(wrapper.reader.toc.entries.items.len);
+    const count = @min(total, max_count);
+    for (0..count) |i| {
+        const entry = wrapper.reader.toc.entries.items[i];
+        out_infos.?[i] = .{
+            .name = @ptrCast(entry.name.ptr),
+            .storage_type = @intFromEnum(entry.storage_type),
+            .tile_layout = @intFromEnum(entry.tile_layout),
+            .sparsity_type = @intFromEnum(entry.sparsity_type),
+            .ndim = entry.ndim,
+            .shape = entry.shape,
+            .data_offset = entry.data_offset,
+            .data_size = entry.data_size,
+            .residual_offset = entry.residual_offset,
+            .residual_size = entry.residual_size,
+            .scale_offset = entry.scale_offset,
+            .scale_size = entry.scale_size,
+            .block_size = entry.block_size,
+            .sparsity_ratio = entry.sparsity_ratio,
+        };
+    }
+    return count;
+}
+
 pub export fn hk_get_tensor_data(reader_ptr: ?*const hk_reader_t, index: u64, out_size: ?*u64) ?*const anyopaque {
     if (reader_ptr == null) return null;
     const wrapper: *const ReaderWrapper = @ptrCast(@alignCast(reader_ptr));

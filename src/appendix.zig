@@ -125,11 +125,13 @@ pub fn appendRecordToFile(
     record: AppendixRecord,
 ) !void {
     var region = try platform.mapOrReadFile(file_path, allocator);
-    defer region.deinit(allocator);
+    var region_open = true;
+    defer if (region_open) region.deinit(allocator);
 
     if (region.bytes.len < @sizeOf(FileHeader)) return AppendixError.InvalidMagic;
-    const old_header: *const FileHeader = @ptrCast(@alignCast(region.bytes.ptr));
-    if (!old_header.isValid()) return AppendixError.InvalidMagic;
+    const old_header_ptr: *const FileHeader = @ptrCast(@alignCast(region.bytes.ptr));
+    if (!old_header_ptr.isValid()) return AppendixError.InvalidMagic;
+    const old_header = old_header_ptr.*;
 
     const file_size = region.bytes.len;
     const append_offset = std.mem.alignForward(usize, file_size, 8);
@@ -142,13 +144,15 @@ pub fn appendRecordToFile(
 
     // Copy existing file content
     @memcpy(new_buf[0..file_size], region.bytes);
+    region.deinit(allocator);
+    region_open = false;
     // Zero out any alignment gap between old file_size and append_offset
     if (append_offset > file_size) {
         @memset(new_buf[file_size..append_offset], 0);
     }
 
     // Update Header in new buffer
-    var new_hdr = old_header.*;
+    var new_hdr = old_header;
     if (new_hdr.appendix_offset == 0) {
         new_hdr.appendix_offset = @intCast(append_offset);
         new_hdr.flags |= format.HeaderFlags.HAS_APPENDIX;
@@ -208,7 +212,8 @@ pub fn rollbackToFile(
     target_generation: u32,
 ) !void {
     var region = try platform.mapOrReadFile(file_path, allocator);
-    defer region.deinit(allocator);
+    var region_open = true;
+    defer if (region_open) region.deinit(allocator);
 
     if (region.bytes.len < @sizeOf(FileHeader)) return AppendixError.InvalidMagic;
     const header: *const FileHeader = @ptrCast(@alignCast(region.bytes.ptr));
@@ -252,11 +257,19 @@ pub fn rollbackToFile(
         const hdr_bytes = std.mem.asBytes(&hdr_copy);
         @memcpy(new_buf[0..@sizeOf(FileHeader)], hdr_bytes);
 
+        region.deinit(allocator);
+        region_open = false;
+
         var out_file = try cwd.createFile(io, file_path, .{});
         defer out_file.close(io);
         try out_file.writeStreamingAll(io, new_buf);
     } else {
-        const out_slice = region.bytes[0..truncate_pos];
+        const out_slice = try allocator.dupe(u8, region.bytes[0..truncate_pos]);
+        defer allocator.free(out_slice);
+
+        region.deinit(allocator);
+        region_open = false;
+
         var out_file = try cwd.createFile(io, file_path, .{});
         defer out_file.close(io);
         try out_file.writeStreamingAll(io, out_slice);

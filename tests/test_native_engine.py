@@ -169,3 +169,4 @@ def test_native_inference_engine():
 
         # Cache reset
         engine.reset_cache()
+        engine.close()

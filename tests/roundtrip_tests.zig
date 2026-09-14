@@ -332,48 +332,54 @@ test "Appendix Region Append, Read, Lineage & Rollback" {
     });
 
     // 4. Read back and verify via AppendixReader
-    var file_region = try hk.platform.mapOrReadFile(test_path, allocator);
-    defer file_region.deinit(allocator);
+    {
+        var file_region = try hk.platform.mapOrReadFile(test_path, allocator);
+        defer file_region.deinit(allocator);
 
-    var app_reader = try hk.appendix.AppendixReader.init(allocator, file_region.bytes);
-    defer app_reader.deinit();
+        var app_reader = try hk.appendix.AppendixReader.init(allocator, file_region.bytes);
+        defer app_reader.deinit();
 
-    try std.testing.expectEqual(2, app_reader.records.items.len);
-    try std.testing.expectEqual(hk.format.AppendixEntryType.lora_adapter, app_reader.records.items[0].entry_type);
-    try std.testing.expectEqualStrings("adapter.generation1.lora", app_reader.records.items[0].name);
-    try std.testing.expectEqual(1, app_reader.records.items[0].generation);
-    try std.testing.expectEqualStrings(lora_payload, app_reader.records.items[0].data);
+        try std.testing.expectEqual(2, app_reader.records.items.len);
+        try std.testing.expectEqual(hk.format.AppendixEntryType.lora_adapter, app_reader.records.items[0].entry_type);
+        try std.testing.expectEqualStrings("adapter.generation1.lora", app_reader.records.items[0].name);
+        try std.testing.expectEqual(1, app_reader.records.items[0].generation);
+        try std.testing.expectEqualStrings(lora_payload, app_reader.records.items[0].data);
 
-    try std.testing.expectEqual(hk.format.AppendixEntryType.code_eval, app_reader.records.items[1].entry_type);
-    try std.testing.expectEqualStrings("eval.generation2.execution", app_reader.records.items[1].name);
-    try std.testing.expectEqual(2, app_reader.records.items[1].generation);
-    try std.testing.expectEqual(@as(f32, 1.0), app_reader.records.items[1].metrics.pass_rate);
+        try std.testing.expectEqual(hk.format.AppendixEntryType.code_eval, app_reader.records.items[1].entry_type);
+        try std.testing.expectEqualStrings("eval.generation2.execution", app_reader.records.items[1].name);
+        try std.testing.expectEqual(2, app_reader.records.items[1].generation);
+        try std.testing.expectEqual(@as(f32, 1.0), app_reader.records.items[1].metrics.pass_rate);
 
-    // Verify cryptographic SHA-256 lineage
-    try std.testing.expect(app_reader.verifyLineage());
+        // Verify cryptographic SHA-256 lineage
+        try std.testing.expect(app_reader.verifyLineage());
+    }
 
     // 5. Test Rollback to Generation 1
     try hk.appendix.rollbackToFile(allocator, test_path, 1);
 
-    var rollback_region = try hk.platform.mapOrReadFile(test_path, allocator);
-    defer rollback_region.deinit(allocator);
+    {
+        var rollback_region = try hk.platform.mapOrReadFile(test_path, allocator);
+        defer rollback_region.deinit(allocator);
 
-    var app_reader_rb1 = try hk.appendix.AppendixReader.init(allocator, rollback_region.bytes);
-    defer app_reader_rb1.deinit();
+        var app_reader_rb1 = try hk.appendix.AppendixReader.init(allocator, rollback_region.bytes);
+        defer app_reader_rb1.deinit();
 
-    try std.testing.expectEqual(1, app_reader_rb1.records.items.len);
-    try std.testing.expectEqual(1, app_reader_rb1.records.items[0].generation);
+        try std.testing.expectEqual(1, app_reader_rb1.records.items.len);
+        try std.testing.expectEqual(1, app_reader_rb1.records.items[0].generation);
+    }
 
     // 6. Test Rollback to Generation 0 (clears appendix)
     try hk.appendix.rollbackToFile(allocator, test_path, 0);
 
-    var reset_region = try hk.platform.mapOrReadFile(test_path, allocator);
-    defer reset_region.deinit(allocator);
+    {
+        var reset_region = try hk.platform.mapOrReadFile(test_path, allocator);
+        defer reset_region.deinit(allocator);
 
-    var app_reader_rb0 = try hk.appendix.AppendixReader.init(allocator, reset_region.bytes);
-    defer app_reader_rb0.deinit();
+        var app_reader_rb0 = try hk.appendix.AppendixReader.init(allocator, reset_region.bytes);
+        defer app_reader_rb0.deinit();
 
-    try std.testing.expectEqual(0, app_reader_rb0.records.items.len);
+        try std.testing.expectEqual(0, app_reader_rb0.records.items.len);
+    }
 }
 
 test "flexible alignment writing and reading (alignment = 1, 16, 64)" {

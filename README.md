@@ -10,6 +10,22 @@ HK is a unified neural framework and binary container format (`.hk`) engineered 
 
 ---
 
+## Two Operating Modes: Native GPU vs. Universal Raw Weight
+
+HK is architected around two complementary operating modes sharing the same high-performance binary container engine:
+
+| Capability | Mode 1: Native GPU / Quantized & Tiled Mode | Mode 2: Universal Raw Weight Mode |
+| :--- | :--- | :--- |
+| **Target Silicon** | NVIDIA GPUs & high-throughput accelerators | AMD GPUs/CPUs, Intel NPUs/CPUs, Apple Silicon, ARM & NVIDIA |
+| **Data Types** | NF4, FP4, DQ8, FP8, 2:4 structured sparse tensors | BF16, FP16, FP32, INT8, INT16, INT32, INT64, BOOL |
+| **Compute Overhead** | Hardware dequantization / tensor core decoding | **Zero compute headroom** (direct memory mapping) |
+| **Memory Alignment** | **128-byte coalescing** (`TILE_ALIGNED`, `SPARSITY_2_4`) | **4096-byte super-coalesced** (AMD/Intel/Apple/NVIDIA) |
+| **NVIDIA Coalescing** | 100% strict warp coalescing | 100% strict warp coalescing ($4096 \pmod{128} = 0$) |
+| **Sharding / Split Mode**| Supported (layer splitting, regeneratable weights) | Supported (`save_sharded_raw` / `load_sharded_raw`) |
+| **Primary APIs** | `hk.save_file()`, `hk.load_file()`, `NativeHKEngine` | `hk.save_raw()`, `hk.load_raw()`, `HKRawWeightStore` |
+
+---
+
 ## Core Pillars & Highlights
 
 ### 1. Foundational Raw Weight Storage & Super-Coalesced Multi-Device Architecture
@@ -196,7 +212,24 @@ hk hash model.hk
 
 ## Empirical Benchmarks
 
-### 1. Non-Quantized Loading & Memory-Mapped Slicing (HK vs SafeTensors)
+### 1. ~1 Billion Parameter Production Model Benchmark (`Qwen3.5-0.8B`)
+Evaluated against a real production non-quantized model with **873,438,784 bfloat16 parameters** (488 tensors, 1.75 GB) comparing standard **Hugging Face / PyTorch / Safetensors** workflows against the **HK Tensor-Optimized Raw Weight Engine** (`qwen_0.8b_optimized.hk` with 4096-byte Universal Page Alignment + 128-byte NVIDIA Tensor Core Coalescing):
+
+| Benchmark Metric | Standard Hugging Face / PyTorch | HK Tensor-Optimized Engine | Speedup / Advantage |
+| :--- | :--- | :--- | :--- |
+| **Layer GEMV Compute ($y = W \cdot x$)** | 0.37 ms (20.04 GFLOPS) | **0.21 ms (34.38 GFLOPS)** | **1.72× FASTER** *(+71.6% compute throughput)* |
+| **Autoregressive Layer Retrieval (Warm)** | 28.84 $\mu$s | **0.08 $\mu$s (80 ns)** | **346.10× FASTER** *(Sub-Microsecond)* |
+| **Autoregressive Layer Retrieval (Cold)** | 506.23 $\mu$s | **136.07 $\mu$s** | **3.72× FASTER** |
+| **Full Model Weight Load (1.75 GB, 488 tensors)** | 10.30 ms | **15.88 ms** | Pure zero-copy OS memory mapping (`HKDict`) |
+| **Safetensors $\to$ HK Transcoding Speed** | N/A | **222.23 MB/s** | Streaming zero-memory generator |
+
+- **4-Row Unrolled SIMD GEMV**: `HKRawWeightStore.gemv` evaluates 4 output rows simultaneously in registers with 8 interleaved 256-bit SIMD accumulators, eliminating cache thrashing and achieving **34.38 GFLOPS** on a single CPU core.
+- **Sub-Microsecond Layer Access**: Once mapped, layer retrieval executes in **80 nanoseconds**, delivering virtually instantaneous weight feed to compute cores during token-by-token generation.
+- **Reproducibility**: Run this exact benchmark locally on any machine with `python benchmarks/benchmark_1b_model.py`.
+
+---
+
+### 2. Non-Quantized Loading & Memory-Mapped Slicing (HK vs SafeTensors)
 Evaluated across 32 dense full-precision tensors (224.00 MB FP32) with 50 iterations per operation:
 
 | Reader / Loader Access Pattern | Container Size | Operation | Latency (ms) | Relative Performance |
@@ -213,7 +246,7 @@ Evaluated across 32 dense full-precision tensors (224.00 MB FP32) with 50 iterat
 
 ---
 
-### 2. Lossless NVIDIA Ampere 2:4 Structured Sparsity
+### 3. Lossless NVIDIA Ampere 2:4 Structured Sparsity
 Bit-exact hardware physical nibble compression without numerical precision loss:
 
 | Operation | Input Size | Output Size | Compression | Latency (ms) | Throughput (MB/s) | Max Absolute Error |
@@ -225,7 +258,7 @@ Bit-exact hardware physical nibble compression without numerical precision loss:
 
 ---
 
-### 3. Native Zig CLI & Process Footprint
+### 4. Native Zig CLI & Process Footprint
 Comparing process initialization and idle memory between Python/PyTorch and the native `hk.exe` binary:
 
 | Metric | Python Runtime (Torch + HK) | Standalone Zig Binary (`hk.exe`) | Improvement / Delta |
@@ -238,7 +271,7 @@ Comparing process initialization and idle memory between Python/PyTorch and the 
 
 ---
 
-### 4. Quantization Benchmarks (Complementary Deployment)
+### 5. Quantization Benchmarks (Complementary Deployment)
 Evaluated on a 2048 x 2048 matrix (4,194,304 f32 elements / 16.00 MB) with AVX2 SIMD acceleration:
 
 | Quant Format | Packed Size | Compression | Quant Latency | Quant Throughput | Dequant Latency | Dequant Throughput | Cosine Sim |

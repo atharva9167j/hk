@@ -1,12 +1,43 @@
 const std = @import("std");
 
-pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE: usize = if (@import("builtin").os.tag == .windows)
+    4096
+else if (@hasDecl(std.posix, "page_size_min"))
+    std.posix.page_size_min
+else
+    4096;
 
 pub const MmapRegion = struct {
     bytes: []align(PAGE_SIZE) u8,
+    is_mmap: bool = false,
+    file_handle: ?std.os.windows.HANDLE = null,
+    mapping_handle: ?std.os.windows.HANDLE = null,
 
     pub fn deinit(self: *MmapRegion, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
+        if (@import("builtin").os.tag == .windows) {
+            if (self.is_mmap) {
+                const win = struct {
+                    extern "kernel32" fn UnmapViewOfFile(lpBaseAddress: ?*const anyopaque) callconv(.winapi) i32;
+                    extern "kernel32" fn CloseHandle(hObject: std.os.windows.HANDLE) callconv(.winapi) i32;
+                };
+                if (self.bytes.len > 0) {
+                    _ = win.UnmapViewOfFile(self.bytes.ptr);
+                }
+                if (self.mapping_handle) |h| _ = win.CloseHandle(h);
+                if (self.file_handle) |h| _ = win.CloseHandle(h);
+                return;
+            }
+        } else {
+            if (self.is_mmap) {
+                if (self.bytes.len > 0) {
+                    std.posix.munmap(@alignCast(self.bytes));
+                }
+                return;
+            }
+        }
+        if (self.bytes.len > 0) {
+            allocator.free(self.bytes);
+        }
     }
 };
 
@@ -156,8 +187,87 @@ pub fn isAligned(offset: usize, alignment: usize) bool {
     return (offset % alignment) == 0;
 }
 
+var empty_aligned_page: [PAGE_SIZE]u8 align(PAGE_SIZE) = undefined;
+
 /// Reads or maps an entire file into memory with page alignment
 pub fn mapOrReadFile(path: []const u8, allocator: std.mem.Allocator) !MmapRegion {
+    if (@import("builtin").os.tag == .windows) {
+        const win = struct {
+            extern "kernel32" fn CreateFileA(
+                lpFileName: [*:0]const u8,
+                dwDesiredAccess: u32,
+                dwShareMode: u32,
+                lpSecurityAttributes: ?*anyopaque,
+                dwCreationDisposition: u32,
+                dwFlagsAndAttributes: u32,
+                hTemplateFile: ?*anyopaque,
+            ) callconv(.winapi) std.os.windows.HANDLE;
+
+            extern "kernel32" fn GetFileSizeEx(
+                hFile: std.os.windows.HANDLE,
+                lpFileSize: *i64,
+            ) callconv(.winapi) i32;
+
+            extern "kernel32" fn CreateFileMappingA(
+                hFile: std.os.windows.HANDLE,
+                lpFileMappingAttributes: ?*anyopaque,
+                flProtect: u32,
+                dwMaximumSizeHigh: u32,
+                dwMaximumSizeLow: u32,
+                lpName: ?[*:0]const u8,
+            ) callconv(.winapi) ?std.os.windows.HANDLE;
+
+            extern "kernel32" fn MapViewOfFile(
+                hFileMappingObject: std.os.windows.HANDLE,
+                dwDesiredAccess: u32,
+                dwFileOffsetHigh: u32,
+                dwFileOffsetLow: u32,
+                dwNumberOfBytesToMap: usize,
+            ) callconv(.winapi) ?*anyopaque;
+
+            extern "kernel32" fn CloseHandle(hObject: std.os.windows.HANDLE) callconv(.winapi) i32;
+        };
+
+        const path_z = allocator.dupeZ(u8, path) catch null;
+        if (path_z) |pz| {
+            defer allocator.free(pz);
+            // GENERIC_READ = 0x80000000, FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2, OPEN_EXISTING = 3, FILE_ATTRIBUTE_NORMAL = 0x80
+            const file_handle = win.CreateFileA(pz.ptr, 0x80000000, 1 | 2, null, 3, 0x80, null);
+            if (file_handle != std.os.windows.INVALID_HANDLE_VALUE) {
+                var file_size: i64 = 0;
+                if (win.GetFileSizeEx(file_handle, &file_size) != 0 and file_size >= 0) {
+                    const size: usize = @intCast(file_size);
+                    if (size == 0) {
+                        return MmapRegion{
+                            .bytes = empty_aligned_page[0..0],
+                            .is_mmap = true,
+                            .file_handle = file_handle,
+                            .mapping_handle = null,
+                        };
+                    }
+                    // PAGE_READONLY = 0x02
+                    const map_handle = win.CreateFileMappingA(file_handle, null, 0x02, 0, 0, null);
+                    if (map_handle != null and map_handle.? != std.os.windows.INVALID_HANDLE_VALUE) {
+                        // FILE_MAP_READ = 0x0004
+                        const view_ptr = win.MapViewOfFile(map_handle.?, 0x0004, 0, 0, 0);
+                        if (view_ptr != null) {
+                            const raw_ptr: [*]align(PAGE_SIZE) u8 = @ptrCast(@alignCast(view_ptr.?));
+                            return MmapRegion{
+                                .bytes = raw_ptr[0..size],
+                                .is_mmap = true,
+                                .file_handle = file_handle,
+                                .mapping_handle = map_handle,
+                            };
+                        }
+                        _ = win.CloseHandle(map_handle.?);
+                    }
+                }
+                _ = win.CloseHandle(file_handle);
+            }
+        }
+    }
+
+    // Fallback: synchronous read
     const io = std.Options.debug_io;
     const cwd = std.Io.Dir.cwd();
 
@@ -166,6 +276,12 @@ pub fn mapOrReadFile(path: []const u8, allocator: std.mem.Allocator) !MmapRegion
 
     const st = try file.stat(io);
     const size: usize = @intCast(st.size);
+    if (size == 0) {
+        return MmapRegion{
+            .bytes = empty_aligned_page[0..0],
+            .is_mmap = false,
+        };
+    }
 
     const aligned_slice = try allocator.alignedAlloc(u8, .fromByteUnits(PAGE_SIZE), size);
     errdefer allocator.free(aligned_slice);
@@ -178,6 +294,7 @@ pub fn mapOrReadFile(path: []const u8, allocator: std.mem.Allocator) !MmapRegion
 
     return MmapRegion{
         .bytes = aligned_slice,
+        .is_mmap = false,
     };
 }
 

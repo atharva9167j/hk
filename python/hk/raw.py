@@ -56,6 +56,7 @@ from .native import (
     native_gemv_bf16,
     native_gemv_f16,
     native_gemv_int8,
+    native_gemv_f32,
     is_native_available,
 )
 
@@ -135,7 +136,8 @@ def save_raw(
             writer.add_metadata_int("split_index", split_index)
             writer.add_metadata_int("split_count", split_count)
 
-        for name, tensor in tensors.items():
+        items = tensors.items() if hasattr(tensors, "items") else tensors
+        for name, tensor in items:
             raw_bytes, shape, stype = _tensor_to_storage_and_bytes(tensor)
             writer.add_tensor(
                 name=name,
@@ -147,6 +149,16 @@ def save_raw(
         writer.write_to_file(path_str)
     finally:
         writer.close()
+
+
+class HKDict(dict):
+    """
+    A high-performance dictionary holding zero-copy mapped tensors.
+    Retains the underlying reader handle so mapped memory remains valid as long as the dict is referenced.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._reader = None
 
 
 def load_raw(
@@ -163,27 +175,34 @@ def load_raw(
         device: Target PyTorch device (e.g. 'cuda', 'cpu', 'mps').
     """
     path_str = str(filename)
-    with NativeHKReader(path_str) as reader:
-        out: Dict[str, Union[torch.Tensor, np.ndarray]] = {}
-        for name, meta in reader.tensors.items():
-            arr = reader.get_tensor_raw(name)
-            stype = meta["storage_type"]
+    reader = NativeHKReader(path_str)
+    out = HKDict()
+    out._reader = reader
 
-            if as_torch:
-                if stype == STORAGE_BF16:
-                    t = torch.from_numpy(arr.view(np.int16)).view(torch.bfloat16).clone()
-                elif stype == STORAGE_BOOL:
-                    t = torch.from_numpy(arr.astype(bool))
-                else:
-                    t = torch.from_numpy(arr).clone()
+    for name, meta in reader.tensors.items():
+        arr = reader.get_tensor_raw(name)
+        stype = meta["storage_type"]
 
-                if device is not None:
-                    t = t.to(device)
-                out[name] = t
+        if as_torch:
+            if stype == STORAGE_BF16:
+                t = torch.from_numpy(arr.view(np.int16)).view(torch.bfloat16)
+            elif stype == STORAGE_BOOL:
+                t = torch.from_numpy(arr.astype(bool))
             else:
-                out[name] = arr.copy()
+                t = torch.from_numpy(arr)
 
-        return out
+            try:
+                t._reader = reader
+            except Exception:
+                pass
+
+            if device is not None:
+                t = t.to(device)
+            out[name] = t
+        else:
+            out[name] = arr
+
+    return out
 
 
 def save_sharded_raw(
@@ -379,6 +398,8 @@ class HKRawWeightStore:
             y_np = native_gemv_f16(w_arr, x_np, bias=bias_np)
         elif stype == STORAGE_INT8:
             y_np = native_gemv_int8(w_arr, x_np, bias=bias_np)
+        elif stype == STORAGE_F32:
+            y_np = native_gemv_f32(w_arr, x_np, bias=bias_np)
         else:
             w_f32 = w_arr.astype(np.float32)
             y_np = np.dot(w_f32, x_np.astype(np.float32))

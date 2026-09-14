@@ -157,6 +157,10 @@ if _LIB is not None:
     _LIB.hk_get_tensor_info.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(C_TensorInfo)]
     _LIB.hk_get_tensor_info.restype = ctypes.c_int
 
+    if hasattr(_LIB, "hk_get_all_tensor_infos"):
+        _LIB.hk_get_all_tensor_infos.argtypes = [ctypes.c_void_p, ctypes.POINTER(C_TensorInfo), ctypes.c_uint64]
+        _LIB.hk_get_all_tensor_infos.restype = ctypes.c_uint64
+
     _LIB.hk_get_tensor_data.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64)]
     _LIB.hk_get_tensor_data.restype = ctypes.c_void_p
 
@@ -1735,9 +1739,12 @@ class NativeHKReader:
 
         self.tensor_count = int(_LIB.hk_get_tensor_count(self.ptr))
         self.tensors: Dict[str, Dict[str, Any]] = {}
-        for i in range(self.tensor_count):
-            info = C_TensorInfo()
-            if _LIB.hk_get_tensor_info(self.ptr, i, ctypes.byref(info)) == 0:
+        if hasattr(_LIB, "hk_get_all_tensor_infos") and self.tensor_count > 0:
+            InfoArray = C_TensorInfo * self.tensor_count
+            info_arr = InfoArray()
+            n = _LIB.hk_get_all_tensor_infos(self.ptr, info_arr, self.tensor_count)
+            for i in range(n):
+                info = info_arr[i]
                 name = info.name.decode("utf-8") if info.name else f"tensor_{i}"
                 shape = tuple(info.shape[d] for d in range(info.ndim))
                 self.tensors[name] = {
@@ -1755,6 +1762,27 @@ class NativeHKReader:
                     "block_size": info.block_size,
                     "sparsity_ratio": info.sparsity_ratio,
                 }
+        else:
+            for i in range(self.tensor_count):
+                info = C_TensorInfo()
+                if _LIB.hk_get_tensor_info(self.ptr, i, ctypes.byref(info)) == 0:
+                    name = info.name.decode("utf-8") if info.name else f"tensor_{i}"
+                    shape = tuple(info.shape[d] for d in range(info.ndim))
+                    self.tensors[name] = {
+                        "index": i,
+                        "name": name,
+                        "storage_type": info.storage_type,
+                        "tile_layout": info.tile_layout,
+                        "sparsity_type": info.sparsity_type,
+                        "ndim": info.ndim,
+                        "shape": shape,
+                        "data_offset": info.data_offset,
+                        "data_size": info.data_size,
+                        "residual_size": info.residual_size,
+                        "scale_size": info.scale_size,
+                        "block_size": info.block_size,
+                        "sparsity_ratio": info.sparsity_ratio,
+                    }
 
         self.metadata: Dict[str, Any] = {}
         self.alignment: int = 128
@@ -2162,10 +2190,19 @@ class NativeHKEngine:
             raise RuntimeError(f"Failed to load native engine from {file_path}")
         self._vocab_size = int(_LIB.hk_engine_get_vocab_size(self._ptr))
 
-    def __del__(self):
+    def close(self):
         if hasattr(self, "_ptr") and self._ptr and _LIB is not None:
             _LIB.hk_engine_free(self._ptr)
             self._ptr = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        self.close()
 
     @property
     def vocab_size(self) -> int:
@@ -2432,6 +2469,38 @@ def native_gemv_bf16(
             w_f32 = (w.astype(np.uint32) << 16).view(np.float32)
         else:
             w_f32 = w.astype(np.float32)
+        y = np.dot(w_f32, x_f32)
+        if bias is not None:
+            y += bias
+    return y
+
+
+def native_gemv_f32(
+    w: np.ndarray,
+    x: np.ndarray,
+    bias: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Fast Matrix-Vector Multiplication with raw FP32 weights: y = W_f32 * x + bias."""
+    M, K = w.shape
+    y = np.empty(M, dtype=np.float32)
+    x_f32 = np.ascontiguousarray(x, dtype=np.float32)
+    b_ptr = None
+    if bias is not None:
+        b_f32 = np.ascontiguousarray(bias, dtype=np.float32)
+        b_ptr = b_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    if is_native_available() and hasattr(_LIB, "hk_gemv_f32"):
+        w_f32 = np.ascontiguousarray(w, dtype=np.float32)
+        _LIB.hk_gemv_f32(
+            w_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            b_ptr,
+            y.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_uint64(M),
+            ctypes.c_uint64(K),
+        )
+    else:
+        w_f32 = np.ascontiguousarray(w, dtype=np.float32)
         y = np.dot(w_f32, x_f32)
         if bias is not None:
             y += bias
