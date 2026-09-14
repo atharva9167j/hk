@@ -59,11 +59,26 @@ jobs:
       - name: Build Dynamic Library
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
 
+      - name: Prepare Named Artifact
+        shell: bash
+        run: |
+          mkdir -p zig-out/staged
+          if [ -f zig-out/lib/libhk.so ]; then
+            cp zig-out/lib/libhk.so zig-out/staged/${{ matrix.artifact_name }}
+          fi
+          if [ -f zig-out/lib/libhk.dylib ]; then
+            cp zig-out/lib/libhk.dylib zig-out/staged/${{ matrix.artifact_name }}
+          fi
+          if [ -f zig-out/bin/hk.dll ]; then
+            cp zig-out/bin/hk.dll zig-out/staged/${{ matrix.artifact_name }}
+          fi
+
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}
           path: |
+            zig-out/staged/*
             zig-out/lib/*
             zig-out/bin/*.dll
 
@@ -146,6 +161,7 @@ jobs:
           skip-existing: true
           # Fallback to token if repository secret exists, otherwise uses OIDC
           password: ${{ secrets.PYPI_API_TOKEN }}
+        continue-on-error: true
 
   publish-npm:
     name: Publish to NPM
@@ -180,6 +196,7 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        continue-on-error: true
 
   publish-crates:
     name: Publish to Crates.io (Rust)
