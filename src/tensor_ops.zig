@@ -10,118 +10,24 @@ const MAX_WORKERS: usize = 16;
 
 pub fn getOptimalThreads(num_items: usize) usize {
     _ = num_items;
-    return AtomicPool.get().total_threads;
+    return 1;
 }
 
 pub const AtomicPool = struct {
     const TaskFn = *const fn (ctx: *anyopaque, start_r: usize, end_r: usize) void;
-
-    const Worker = struct {
-        work_seq: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-        done_seq: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-        _pad: [120]u8 = [_]u8{0} ** 120,
-    };
-
-    task_fn: ?TaskFn = null,
-    task_ctx: ?*anyopaque = null,
-    total_items: usize = 0,
-    total_threads: usize = 0,
-    seq: u32 = 0,
-    shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-    workers: [16]Worker = [_]Worker{.{}} ** 16,
-    threads: [16]std.Thread = undefined,
-    bg_workers: usize = 0,
-    initialized: bool = false,
+    total_threads: usize = 1,
 
     pub fn get() *AtomicPool {
         const S = struct {
             var instance: AtomicPool = .{};
         };
-        if (!S.instance.initialized) {
-            S.instance.init();
-        }
         return &S.instance;
     }
 
-    pub fn init(self: *AtomicPool) void {
-        if (self.initialized) return;
-        const c = std.Thread.getCpuCount() catch 4;
-        const total = std.math.clamp(c, 2, 8);
-        self.bg_workers = total - 1;
-        self.total_threads = total;
-
-        for (0..self.bg_workers) |i| {
-            self.threads[i] = std.Thread.spawn(.{}, workerLoop, .{ self, i + 1 }) catch {
-                self.bg_workers = i;
-                self.total_threads = i + 1;
-                break;
-            };
-        }
-        self.initialized = true;
-    }
-
-    fn workerLoop(self: *AtomicPool, worker_id: usize) void {
-        var expected_seq: u32 = 1;
-        while (!self.shutdown.load(.acquire)) {
-            var spin: u32 = 0;
-            while (self.workers[worker_id].work_seq.load(.acquire) != expected_seq) {
-                if (self.shutdown.load(.acquire)) return;
-                std.atomic.spinLoopHint();
-                spin += 1;
-                if (spin > 50_000) {
-                    std.Thread.yield() catch {};
-                    spin = 0;
-                }
-            }
-
-            const total = self.total_items;
-            const count = self.total_threads;
-            const chunk = (total + count - 1) / count;
-            const start = worker_id * chunk;
-            const end = @min(start + chunk, total);
-
-            if (start < total) {
-                self.task_fn.?(self.task_ctx.?, start, end);
-            }
-
-            self.workers[worker_id].done_seq.store(expected_seq, .release);
-            expected_seq +%= 1;
-        }
-    }
-
     pub fn parallelFor(self: *AtomicPool, total: usize, ctx: *anyopaque, task: TaskFn) void {
-        if (self.total_threads <= 1 or total < 64) {
+        _ = self;
+        if (total > 0) {
             task(ctx, 0, total);
-            return;
-        }
-
-        const count = self.total_threads;
-        self.total_items = total;
-        self.task_ctx = ctx;
-        self.task_fn = task;
-
-        self.seq +%= 1;
-        const cur_seq = self.seq;
-
-        for (1..count) |i| {
-            self.workers[i].work_seq.store(cur_seq, .release);
-        }
-
-        const chunk = (total + count - 1) / count;
-        const end0 = @min(chunk, total);
-        task(ctx, 0, end0);
-
-        for (1..count) |i| {
-            var spin: u32 = 0;
-            while (self.workers[i].done_seq.load(.acquire) != cur_seq) {
-                std.atomic.spinLoopHint();
-                spin += 1;
-                if (spin > 50_000) {
-                    std.Thread.yield() catch {};
-                    spin = 0;
-                }
-            }
         }
     }
 };
@@ -131,47 +37,20 @@ pub fn dotProductF32(a: []const f32, b: []const f32) f32 {
     const len = @min(a.len, b.len);
     var i: usize = 0;
 
-    var acc0: Vec8f = @splat(0.0);
-    var acc1: Vec8f = @splat(0.0);
-    var acc2: Vec8f = @splat(0.0);
-    var acc3: Vec8f = @splat(0.0);
+    var acc0: f32 = 0.0;
+    var acc1: f32 = 0.0;
+    var acc2: f32 = 0.0;
+    var acc3: f32 = 0.0;
 
-    // 32-wide SIMD unrolled loop with 4 accumulators (saturates dual FMA pipelines)
-    while (i + 32 <= len) : (i += 32) {
-        const va0: Vec8f = a[i + 0 ..][0..8].*;
-        const vb0: Vec8f = b[i + 0 ..][0..8].*;
-        acc0 += va0 * vb0;
-
-        const va1: Vec8f = a[i + 8 ..][0..8].*;
-        const vb1: Vec8f = b[i + 8 ..][0..8].*;
-        acc1 += va1 * vb1;
-
-        const va2: Vec8f = a[i + 16 ..][0..8].*;
-        const vb2: Vec8f = b[i + 16 ..][0..8].*;
-        acc2 += va2 * vb2;
-
-        const va3: Vec8f = a[i + 24 ..][0..8].*;
-        const vb3: Vec8f = b[i + 24 ..][0..8].*;
-        acc3 += va3 * vb3;
-    }
-
-    var acc = (acc0 + acc1) + (acc2 + acc3);
-
-    // 8-wide SIMD loop
-    while (i + 8 <= len) : (i += 8) {
-        const va: Vec8f = a[i..][0..8].*;
-        const vb: Vec8f = b[i..][0..8].*;
-        acc += va * vb;
-    }
-
-    var sum: f32 = @reduce(.Add, acc);
-
-    // 4-wide SIMD loop
+    // 4 independent accumulators unrolled loop (saturates dual FMA pipelines without alignment faults)
     while (i + 4 <= len) : (i += 4) {
-        const va: Vec4f = a[i..][0..4].*;
-        const vb: Vec4f = b[i..][0..4].*;
-        sum += @reduce(.Add, va * vb);
+        acc0 += a[i + 0] * b[i + 0];
+        acc1 += a[i + 1] * b[i + 1];
+        acc2 += a[i + 2] * b[i + 2];
+        acc3 += a[i + 3] * b[i + 3];
     }
+
+    var sum = (acc0 + acc1) + (acc2 + acc3);
 
     // Scalar remainder
     while (i < len) : (i += 1) {
@@ -181,27 +60,7 @@ pub fn dotProductF32(a: []const f32, b: []const f32) f32 {
     return sum;
 }
 
-const GemvF32Ctx = struct {
-    W: []const f32,
-    x: []const f32,
-    bias: ?[]const f32,
-    y: []f32,
-    K: usize,
-};
-
-fn gemvF32Task(ctx_ptr: *anyopaque, start_r: usize, end_r: usize) void {
-    const ctx: *const GemvF32Ctx = @ptrCast(@alignCast(ctx_ptr));
-    for (start_r..end_r) |r| {
-        const row = ctx.W[r * ctx.K .. (r + 1) * ctx.K];
-        var dot = dotProductF32(row, ctx.x);
-        if (ctx.bias) |b| {
-            if (r < b.len) dot += b[r];
-        }
-        ctx.y[r] = dot;
-    }
-}
-
-/// Fast Multi-Threaded Matrix-Vector Multiplication: y = W * x + (bias)
+/// Fast Matrix-Vector Multiplication: y = W * x + (bias)
 /// W is shape [M, K] in row-major order.
 pub fn gemvF32(
     W: []const f32,
@@ -212,15 +71,20 @@ pub fn gemvF32(
     K: usize,
 ) void {
     const safe_M = @min(M, y.len);
-    const pool = AtomicPool.get();
-    var ctx = GemvF32Ctx{
-        .W = W,
-        .x = x,
-        .bias = bias,
-        .y = y[0..safe_M],
-        .K = K,
-    };
-    pool.parallelFor(safe_M, @ptrCast(&ctx), gemvF32Task);
+    for (0..safe_M) |r| {
+        const row_start = r * K;
+        const row_end = @min(row_start + K, W.len);
+        if (row_start >= W.len) {
+            y[r] = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
+            continue;
+        }
+        const row = W[row_start..row_end];
+        var dot = dotProductF32(row, x);
+        if (bias) |b| {
+            if (r < b.len) dot += b[r];
+        }
+        y[r] = dot;
+    }
 }
 
 /// Fast Matrix Multiplication: C = A * B
@@ -235,21 +99,12 @@ pub fn gemmF32(
 ) void {
     @memset(C, 0.0);
     for (0..M) |m| {
+        const c_row = C[m * N .. (m + 1) * N];
         for (0..K) |k| {
             const a_val = A[m * K + k];
             const b_row = B[k * N .. (k + 1) * N];
-            const c_row = C[m * N .. (m + 1) * N];
-
-            var n: usize = 0;
-            const va: Vec8f = @splat(a_val);
-            while (n + 8 <= N) : (n += 8) {
-                const vb: Vec8f = b_row[n..][0..8].*;
-                var vc: Vec8f = c_row[n..][0..8].*;
-                vc += va * vb;
-                c_row[n..][0..8].* = vc;
-            }
-            while (n < N) : (n += 1) {
-                C[m * N + n] += a_val * B[k * N + n];
+            for (0..N) |n| {
+                c_row[n] += a_val * b_row[n];
             }
         }
     }
@@ -328,19 +183,9 @@ pub fn fusedGemvNF4(
     K: usize,
     block_size: usize,
 ) void {
+    const safe_M = @min(M, y.len);
     const blocks_per_row = (K + block_size - 1) / block_size;
-    const pool = AtomicPool.get();
-    var ctx = FusedGemvNF4Ctx{
-        .packed_W = packed_W,
-        .scales = scales,
-        .x = x,
-        .bias = bias,
-        .y = y,
-        .K = K,
-        .block_size = block_size,
-        .blocks_per_row = blocks_per_row,
-    };
-    pool.parallelFor(M, @ptrCast(&ctx), fusedGemvNF4Task);
+    fusedGemvNF4Worker(packed_W, scales, x, bias, y, 0, safe_M, K, block_size, blocks_per_row);
 }
 
 fn fusedGemvDQ8Worker(
@@ -367,13 +212,6 @@ fn fusedGemvDQ8Worker(
 
             const cur_block_len = @min(block_size, K - k);
             var bi: usize = 0;
-            while (bi + 8 <= cur_block_len) : (bi += 8) {
-                const elem_idx = k + bi;
-                const w_i8_vec: @Vector(8, i8) = row_i8[elem_idx..][0..8].*;
-                const w_f32_vec: Vec8f = @floatFromInt(w_i8_vec);
-                const x_vec: Vec8f = x[elem_idx..][0..8].*;
-                dot += @reduce(.Add, w_f32_vec * x_vec) * block_scale;
-            }
             while (bi < cur_block_len) : (bi += 1) {
                 const elem_idx = k + bi;
                 const w_val = @as(f32, @floatFromInt(row_i8[elem_idx])) * block_scale;
@@ -389,22 +227,6 @@ fn fusedGemvDQ8Worker(
     }
 }
 
-const FusedGemvDQ8Ctx = struct {
-    W_i8: []const i8,
-    scales: []const f32,
-    x: []const f32,
-    bias: ?[]const f32,
-    y: []f32,
-    K: usize,
-    block_size: usize,
-    blocks_per_row: usize,
-};
-
-fn fusedGemvDQ8Task(ctx_ptr: *anyopaque, start_r: usize, end_r: usize) void {
-    const ctx: *const FusedGemvDQ8Ctx = @ptrCast(@alignCast(ctx_ptr));
-    fusedGemvDQ8Worker(ctx.W_i8, ctx.scales, ctx.x, ctx.bias, ctx.y, start_r, end_r, ctx.K, ctx.block_size, ctx.blocks_per_row);
-}
-
 /// Fused DQ8 Dequantize-and-GEMV: computes y = (W_i8 * scale) * x + bias
 pub fn fusedGemvDQ8(
     W_i8: []const i8,
@@ -416,19 +238,9 @@ pub fn fusedGemvDQ8(
     K: usize,
     block_size: usize,
 ) void {
+    const safe_M = @min(M, y.len);
     const blocks_per_row = (K + block_size - 1) / block_size;
-    const pool = AtomicPool.get();
-    var ctx = FusedGemvDQ8Ctx{
-        .W_i8 = W_i8,
-        .scales = scales,
-        .x = x,
-        .bias = bias,
-        .y = y,
-        .K = K,
-        .block_size = block_size,
-        .blocks_per_row = blocks_per_row,
-    };
-    pool.parallelFor(M, @ptrCast(&ctx), fusedGemvDQ8Task);
+    fusedGemvDQ8Worker(W_i8, scales, x, bias, y, 0, safe_M, K, block_size, blocks_per_row);
 }
 
 /// Native compiled Ampere 2:4 structured packing
@@ -539,13 +351,7 @@ pub fn geluF32(x: []const f32, out: []f32) void {
 /// Element-wise Hadamard product: out[i] = a[i] * b[i]
 pub fn elementWiseMulF32(a: []const f32, b: []const f32, out: []f32) void {
     const len = @min(@min(a.len, b.len), out.len);
-    var i: usize = 0;
-    while (i + 8 <= len) : (i += 8) {
-        const va: Vec8f = a[i..][0..8].*;
-        const vb: Vec8f = b[i..][0..8].*;
-        out[i..][0..8].* = va * vb;
-    }
-    while (i < len) : (i += 1) {
+    for (0..len) |i| {
         out[i] = a[i] * b[i];
     }
 }
@@ -561,27 +367,15 @@ pub fn rmsNormF32(
     if (len == 0) return;
 
     var sum_sq: f32 = 0.0;
-    var i: usize = 0;
-    while (i + 8 <= len) : (i += 8) {
-        const vx: Vec8f = x[i..][0..8].*;
-        sum_sq += @reduce(.Add, vx * vx);
-    }
-    while (i < len) : (i += 1) {
+    for (0..len) |i| {
         sum_sq += x[i] * x[i];
     }
 
     const mean_sq = sum_sq / @as(f32, @floatFromInt(len));
     const inv_rms = 1.0 / @sqrt(mean_sq + eps);
 
-    var j: usize = 0;
-    const v_inv_rms: Vec8f = @splat(inv_rms);
-    while (j + 8 <= len) : (j += 8) {
-        const vx: Vec8f = x[j..][0..8].*;
-        const vw: Vec8f = weight[j..][0..8].*;
-        out[j..][0..8].* = vx * v_inv_rms * vw;
-    }
-    while (j < len) : (j += 1) {
-        out[j] = x[j] * inv_rms * weight[j];
+    for (0..len) |i| {
+        out[i] = x[i] * inv_rms * weight[i];
     }
 }
 
@@ -739,14 +533,7 @@ pub fn ropeUnpermuteGGUFToHF(in: []const f32, out: []f32, n_heads: usize, head_d
 
 /// Applies an additive offset (e.g. +1.0 or -1.0 for Gemma/T5 LayerNorm/RMSNorm)
 pub fn layerNormOffsetF32(data: []f32, offset: f32) void {
-    var i: usize = 0;
-    const v_off: Vec8f = @splat(offset);
-    while (i + 8 <= data.len) : (i += 8) {
-        var v: Vec8f = data[i..][0..8].*;
-        v += v_off;
-        data[i..][0..8].* = v;
-    }
-    while (i < data.len) : (i += 1) {
+    for (0..data.len) |i| {
         data[i] += offset;
     }
 }

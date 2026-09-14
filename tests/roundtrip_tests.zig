@@ -1347,6 +1347,153 @@ test "native safetensors parser and transcoder roundtrip" {
     try std.testing.expectEqual(@as(f32, 4.0), floats_out[3]);
 }
 
+test "transformer engine load from reader with tiny dimensions" {
+    const allocator = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const cwd = std.Io.Dir.cwd();
+    const tmp_path = "test_tiny_engine.hk";
+    defer cwd.deleteFile(io, tmp_path) catch {};
+
+    var writer = hk.writer.HKWriter.init(allocator);
+    defer writer.deinit();
+
+    try writer.addMetadataString("general.architecture", "llama");
+    try writer.addMetadataInt("attention.head_count", 2);
+    try writer.addMetadataInt("attention.head_count_kv", 2);
+    try writer.addMetadataInt("rope.dimension_count", 4);
+
+    const dim: usize = 8;
+    const hidden: usize = 16;
+    const vocab: usize = 10;
+
+    const emb = try allocator.alloc(f32, vocab * dim);
+    defer allocator.free(emb);
+    @memset(emb, 0.1);
+    try writer.addTensor(.{
+        .name = "token_embd.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ vocab, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(emb),
+    });
+
+    const norm = try allocator.alloc(f32, dim);
+    defer allocator.free(norm);
+    @memset(norm, 1.0);
+    try writer.addTensor(.{
+        .name = "blk.0.attn_norm.weight",
+        .storage_type = .f32,
+        .ndim = 1,
+        .shape = .{ dim, 0, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(norm),
+    });
+    try writer.addTensor(.{
+        .name = "blk.0.ffn_norm.weight",
+        .storage_type = .f32,
+        .ndim = 1,
+        .shape = .{ dim, 0, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(norm),
+    });
+    try writer.addTensor(.{
+        .name = "output_norm.weight",
+        .storage_type = .f32,
+        .ndim = 1,
+        .shape = .{ dim, 0, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(norm),
+    });
+
+    const w_proj = try allocator.alloc(f32, dim * dim);
+    defer allocator.free(w_proj);
+    @memset(w_proj, 0.05);
+    try writer.addTensor(.{
+        .name = "blk.0.attn_q.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ dim, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_proj),
+    });
+    try writer.addTensor(.{
+        .name = "blk.0.attn_k.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ dim, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_proj),
+    });
+    try writer.addTensor(.{
+        .name = "blk.0.attn_v.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ dim, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_proj),
+    });
+    try writer.addTensor(.{
+        .name = "blk.0.attn_output.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ dim, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_proj),
+    });
+
+    const w_gate_up = try allocator.alloc(f32, hidden * dim);
+    defer allocator.free(w_gate_up);
+    @memset(w_gate_up, 0.05);
+    try writer.addTensor(.{
+        .name = "blk.0.ffn_gate.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ hidden, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_gate_up),
+    });
+    try writer.addTensor(.{
+        .name = "blk.0.ffn_up.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ hidden, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_gate_up),
+    });
+
+    const w_down = try allocator.alloc(f32, dim * hidden);
+    defer allocator.free(w_down);
+    @memset(w_down, 0.05);
+    try writer.addTensor(.{
+        .name = "blk.0.ffn_down.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ dim, hidden, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_down),
+    });
+
+    const w_out = try allocator.alloc(f32, vocab * dim);
+    defer allocator.free(w_out);
+    @memset(w_out, 0.05);
+    try writer.addTensor(.{
+        .name = "output.weight",
+        .storage_type = .f32,
+        .ndim = 2,
+        .shape = .{ vocab, dim, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(w_out),
+    });
+
+    try writer.writeToFile(tmp_path);
+
+    var reader = try hk.reader.HKReader.open(tmp_path, allocator);
+    defer reader.deinit();
+
+    var engine = try hk.inference.TransformerEngine.initFromReader(allocator, &reader);
+    defer {
+        engine.deinit();
+        allocator.destroy(engine);
+    }
+
+    try std.testing.expectEqual(vocab, engine.config.vocab_size);
+    const logits = engine.forward(1, 0);
+    try std.testing.expectEqual(vocab, logits.len);
+    for (logits) |l| {
+        try std.testing.expect(!std.math.isNan(l));
+        try std.testing.expect(!std.math.isInf(l));
+    }
+}
+
 
 
 

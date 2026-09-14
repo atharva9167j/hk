@@ -35,6 +35,7 @@ pub const LayerWeights = struct {
     w_gate: TensorRef,
     w_up: TensorRef,
     w_down: TensorRef,
+    owns_norms: bool = false,
 };
 
 pub const KVCache = struct {
@@ -94,6 +95,7 @@ pub const TransformerEngine = struct {
     tok_embeddings: TensorRef,
     layers: std.ArrayList(LayerWeights) = .empty,
     output_norm: []const f32,
+    owns_output_norm: bool = false,
     lm_head: TensorRef,
     cache: KVCache,
 
@@ -224,7 +226,16 @@ pub const TransformerEngine = struct {
             reader.toc.find("model.norm.weight") orelse
             return error.MissingOutputNormTensor;
         const norm_data = try reader.getTensorData(norm_entry);
-        const output_norm: [*]const f32 = @ptrCast(@alignCast(norm_data.ptr));
+        const output_norm_buf = try allocator.alloc(f32, cfg.dim);
+        errdefer allocator.free(output_norm_buf);
+        for (0..cfg.dim) |i| {
+            const off = i * 4;
+            if (off + 4 <= norm_data.len) {
+                output_norm_buf[i] = @bitCast(std.mem.readInt(u32, norm_data[off .. off + 4][0..4], .little));
+            } else {
+                output_norm_buf[i] = 1.0;
+            }
+        }
 
         // Find lm_head / output.weight
         const head_entry_opt = reader.toc.find("output.weight") orelse
@@ -261,7 +272,8 @@ pub const TransformerEngine = struct {
         const engine = try allocator.create(TransformerEngine);
         errdefer allocator.destroy(engine);
 
-        engine.* = try TransformerEngine.init(allocator, cfg, tok_embeddings, output_norm[0..cfg.dim], lm_head);
+        engine.* = try TransformerEngine.init(allocator, cfg, tok_embeddings, output_norm_buf, lm_head);
+        engine.owns_output_norm = true;
         errdefer engine.deinit();
 
         for (0..cfg.n_layers) |l| {
@@ -298,19 +310,39 @@ pub const TransformerEngine = struct {
             const attn_norm_data = try reader.getTensorData(attn_norm_e);
             const ffn_norm_data = try reader.getTensorData(ffn_norm_e);
 
-            const a_norm_f32: [*]const f32 = @ptrCast(@alignCast(attn_norm_data.ptr));
-            const f_norm_f32: [*]const f32 = @ptrCast(@alignCast(ffn_norm_data.ptr));
+            const a_norm_buf = try allocator.alloc(f32, cfg.dim);
+            errdefer allocator.free(a_norm_buf);
+            for (0..cfg.dim) |i| {
+                const off = i * 4;
+                if (off + 4 <= attn_norm_data.len) {
+                    a_norm_buf[i] = @bitCast(std.mem.readInt(u32, attn_norm_data[off .. off + 4][0..4], .little));
+                } else {
+                    a_norm_buf[i] = 1.0;
+                }
+            }
+
+            const f_norm_buf = try allocator.alloc(f32, cfg.dim);
+            errdefer allocator.free(f_norm_buf);
+            for (0..cfg.dim) |i| {
+                const off = i * 4;
+                if (off + 4 <= ffn_norm_data.len) {
+                    f_norm_buf[i] = @bitCast(std.mem.readInt(u32, ffn_norm_data[off .. off + 4][0..4], .little));
+                } else {
+                    f_norm_buf[i] = 1.0;
+                }
+            }
 
             try engine.layers.append(allocator, .{
-                .attn_norm = a_norm_f32[0..cfg.dim],
+                .attn_norm = a_norm_buf,
                 .wq = .{ .data = try reader.getTensorData(wq_e), .storage_type = wq_e.storage_type, .rows = @intCast(wq_e.shape[0]), .cols = @intCast(wq_e.shape[1]) },
                 .wk = .{ .data = try reader.getTensorData(wk_e), .storage_type = wk_e.storage_type, .rows = @intCast(wk_e.shape[0]), .cols = @intCast(wk_e.shape[1]) },
                 .wv = .{ .data = try reader.getTensorData(wv_e), .storage_type = wv_e.storage_type, .rows = @intCast(wv_e.shape[0]), .cols = @intCast(wv_e.shape[1]) },
                 .wo = .{ .data = try reader.getTensorData(wo_e), .storage_type = wo_e.storage_type, .rows = @intCast(wo_e.shape[0]), .cols = @intCast(wo_e.shape[1]) },
-                .ffn_norm = f_norm_f32[0..cfg.dim],
+                .ffn_norm = f_norm_buf,
                 .w_gate = .{ .data = try reader.getTensorData(wgate_e), .storage_type = wgate_e.storage_type, .rows = @intCast(wgate_e.shape[0]), .cols = @intCast(wgate_e.shape[1]) },
                 .w_up = .{ .data = try reader.getTensorData(wup_e), .storage_type = wup_e.storage_type, .rows = @intCast(wup_e.shape[0]), .cols = @intCast(wup_e.shape[1]) },
                 .w_down = .{ .data = try reader.getTensorData(wdown_e), .storage_type = wdown_e.storage_type, .rows = @intCast(wdown_e.shape[0]), .cols = @intCast(wdown_e.shape[1]) },
+                .owns_norms = true,
             });
         }
 
@@ -318,8 +350,17 @@ pub const TransformerEngine = struct {
     }
 
     pub fn deinit(self: *TransformerEngine) void {
+        for (self.layers.items) |layer| {
+            if (layer.owns_norms) {
+                self.allocator.free(layer.attn_norm);
+                self.allocator.free(layer.ffn_norm);
+            }
+        }
         self.layers.deinit(self.allocator);
         self.cache.deinit();
+        if (self.owns_output_norm) {
+            self.allocator.free(self.output_norm);
+        }
         self.allocator.free(self.x);
         self.allocator.free(self.xb);
         self.allocator.free(self.q);
@@ -513,6 +554,7 @@ pub const TransformerEngine = struct {
                 const max_t = @min(pos + 1, self.config.max_seq_len);
                 for (0..max_t) |t| {
                     const k_t = self.cache.getKeySlice(l, t);
+                    if ((kv_head_idx + 1) * head_dim > k_t.len) continue;
                     const k_head = k_t[kv_head_idx * head_dim .. (kv_head_idx + 1) * head_dim];
                     self.att[t] = tensor_ops.dotProductF32(q_head, k_head) * scale;
                 }
@@ -525,6 +567,7 @@ pub const TransformerEngine = struct {
                 for (0..max_t) |t| {
                     const a = self.att[t];
                     const v_t = self.cache.getValSlice(l, t);
+                    if ((kv_head_idx + 1) * head_dim > v_t.len) continue;
                     const v_head = v_t[kv_head_idx * head_dim .. (kv_head_idx + 1) * head_dim];
                     for (0..head_dim) |d| {
                         out_head[d] += a * v_head[d];
@@ -536,7 +579,8 @@ pub const TransformerEngine = struct {
             matVec(layer.wo, self.xb, null, self.q);
 
             // Residual connection: x = x + q
-            for (0..dim) |i| {
+            const dim_len = @min(@min(dim, self.x.len), self.q.len);
+            for (0..dim_len) |i| {
                 self.x[i] += self.q[i];
             }
 
@@ -546,7 +590,8 @@ pub const TransformerEngine = struct {
             matVec(layer.w_up, self.xb, null, self.up);
 
             // SiLU(gate) * up
-            for (0..cfg.hidden_dim) |i| {
+            const hidden_len = @min(@min(cfg.hidden_dim, self.gate.len), self.up.len);
+            for (0..hidden_len) |i| {
                 const g = self.gate[i];
                 const silu_g = g / (1.0 + @exp(-g));
                 self.gate[i] = silu_g * self.up[i];
@@ -556,7 +601,8 @@ pub const TransformerEngine = struct {
             matVec(layer.w_down, self.gate, null, self.xb);
 
             // Residual connection: x = x + xb
-            for (0..dim) |i| {
+            const xb_len = @min(@min(dim, self.x.len), self.xb.len);
+            for (0..xb_len) |i| {
                 self.x[i] += self.xb[i];
             }
         }
