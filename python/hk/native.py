@@ -2110,7 +2110,13 @@ def native_hf_map_tensor_name(name: str, arch: str = "llama", to_hk: bool = True
     return None
 
 
-def native_context_truncate(tokens: Union[List[int], np.ndarray], max_tokens: int, strategy: int, head_ratio: float) -> Optional[Union[List[int], np.ndarray]]:
+def native_context_truncate(
+    tokens: Union[List[int], np.ndarray],
+    max_tokens: int,
+    strategy: int,
+    head_ratio: float,
+    out: Optional[np.ndarray] = None,
+) -> Optional[Union[List[int], np.ndarray]]:
     """Truncates token sequence using native Zig ContextWindowManager with zero-copy buffer passing."""
     if not is_native_available() or not hasattr(_LIB, "hk_context_truncate"):
         return None
@@ -2123,7 +2129,10 @@ def native_context_truncate(tokens: Union[List[int], np.ndarray], max_tokens: in
         arr = np.ascontiguousarray(tokens.detach().cpu().numpy(), dtype=np.uint32)
 
     n = arr.size
-    out_arr = np.empty(max_tokens, dtype=np.uint32)
+    if out is not None and isinstance(out, np.ndarray) and out.size >= max_tokens:
+        out_arr = out[:max_tokens]
+    else:
+        out_arr = np.empty(max_tokens, dtype=np.uint32)
     out_len = ctypes.c_size_t(0)
     ret = _LIB.hk_context_truncate(
         arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
