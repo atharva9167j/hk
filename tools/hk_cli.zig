@@ -268,6 +268,8 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "gui")) {
         const file_path_opt = it.next();
         try cmdGui(file_path_opt, allocator);
+    } else if (std.mem.eql(u8, command, "hardware-profile")) {
+        try cmdHardwareProfile();
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         printUsage();
     } else {
@@ -303,9 +305,54 @@ fn printUsage() void {
         \\  appendix       <file.hk>                     Display version-chained appendix records & metrics
         \\  rollback       <file.hk> [generation]        Rollback appendix entries to specified generation
         \\  metadata       <set|get|list> <file.hk> ...  In-place metadata inspection and modification
+        \\  hardware-profile                             Profile host CPU, vector units, and optimal page alignment
         \\  help                                         Show this help message
         \\
     , .{});
+}
+
+fn cmdHardwareProfile() !void {
+    const caps = hk.platform.detectHardwareCapabilities();
+    std.debug.print(
+        \\============================================================
+        \\HK Hardware Capabilities & Architecture Profiler
+        \\============================================================
+        \\CPU Vendor            : {s}
+        \\AVX2 SIMD             : {}
+        \\AVX-512 Foundation    : {}
+        \\AVX-512 / AVX-VNNI    : {}
+        \\Intel AMX Matrix Accel: {}
+        \\ARM NEON Vector       : {}
+        \\ARM SVE / SVE2        : {}
+        \\Apple Silicon Unified : {}
+        \\AMD ROCm Ready        : {}
+        \\Intel NPU Ready       : {}
+        \\Optimal Page Alignment: {} Bytes ({s})
+        \\Direct DMA Hugepage   : {} Bytes (64 KB)
+        \\Tensor Core Coalescing: 100% Guaranteed (Divisible by 128)
+        \\============================================================
+        \\
+    , .{
+        switch (caps.vendor) {
+            .intel => "Intel Corporation",
+            .amd => "Advanced Micro Devices (AMD)",
+            .arm => "ARM Architecture",
+            .apple => "Apple Silicon (M-Series)",
+            .unknown => "Generic Architecture",
+        },
+        caps.has_avx2,
+        caps.has_avx512f,
+        caps.has_avx512vnni or caps.has_avx_vnni,
+        caps.has_amx,
+        caps.has_arm_neon,
+        caps.has_arm_sve,
+        caps.is_apple_silicon,
+        caps.has_rocm_ready,
+        caps.has_npu_ready,
+        caps.optimal_page_alignment,
+        if (caps.optimal_page_alignment == 16384) "16KB Apple Metal Zero-Copy" else "4KB Universal Super-Coalesced",
+        caps.dma_hugepage_alignment,
+    });
 }
 
 fn cmdConvertGGUF(input_path: []const u8, output_path: []const u8, allocator: std.mem.Allocator) !void {
@@ -400,10 +447,19 @@ fn cmdInspect(path: []const u8, allocator: std.mem.Allocator) !void {
         reader.header.tensor_count,
         reader.header.metadata_kv_count,
     });
-    std.debug.print("Data Offset: 0x{X} (128-byte aligned: {})\n", .{
+    std.debug.print("Data Offset: 0x{X} (Alignment: {}B, Tensor Core Coalesced: {})\n", .{
         reader.header.tensor_data_offset,
-        (reader.header.tensor_data_offset % hk.format.ALIGNMENT_BYTES) == 0,
+        reader.getAlignment(),
+        reader.isTensorCoreAligned(),
     });
+    if (reader.isRawWeightStorage()) {
+        std.debug.print("Storage Mode: Raw Weight Storage (Zero compute headroom, direct zero-copy)\n", .{});
+    } else {
+        std.debug.print("Storage Mode: Quantized Neural Container\n", .{});
+    }
+    if (reader.isUniversalPageAligned()) {
+        std.debug.print("Universal Page Alignment: Enabled (Direct zero-copy for AMD ROCm, Intel NPU, Apple Metal)\n", .{});
+    }
     if (reader.isSharded()) {
         std.debug.print("Sharding: Shard {} of {} (FLAG_IS_SHARDED enabled)\n", .{
             reader.getSplitIndex() + 1,

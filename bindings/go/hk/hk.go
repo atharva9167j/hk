@@ -27,6 +27,11 @@ const (
 	StorageInt64       StorageType = 0x07
 	StorageUint8       StorageType = 0x08
 	StorageBool        StorageType = 0x09
+	StorageInt16       StorageType = 0x0A
+	StorageUint16      StorageType = 0x0B
+	StorageUint32      StorageType = 0x0C
+	StorageUint64      StorageType = 0x0D
+	StorageF64         StorageType = 0x0E
 	StorageDQ4         StorageType = 0x10
 	StorageNF4         StorageType = 0x10
 	StorageDQ8         StorageType = 0x11
@@ -61,7 +66,15 @@ const (
 	StorageNVFP4       StorageType = 0x63
 )
 
-const FlagIsSharded = 0x40
+const (
+	FlagIsSharded              = 0x40
+	FlagRawWeightStorage       = 1 << 7
+	FlagUniversalPageAligned   = 1 << 8
+	DefaultAlignmentBytes      = 128
+	UniversalPageAlignmentBytes = 4096
+	AppleSiliconAlignmentBytes = 16384
+	DirectDMAAlignmentBytes    = 65536
+)
 
 type TileLayout byte
 
@@ -195,6 +208,15 @@ func (t *Tensor) RawScales() []byte {
 	return C.GoBytes(ptr, C.int(size))
 }
 
+func (t *Tensor) RawBytes() []byte {
+	var size C.uint64_t
+	ptr := C.hk_get_tensor_raw_ptr(t.model.handle, t.index, &size)
+	if ptr == nil || size == 0 {
+		return nil
+	}
+	return C.GoBytes(ptr, C.int(size))
+}
+
 type AppendixEntry struct {
 	EntryType    AppendixType
 	Flags        uint8
@@ -305,6 +327,22 @@ func (m *Model) SplitIndex() uint16 {
 
 func (m *Model) SplitCount() uint16 {
 	return uint16(C.hk_reader_get_split_count(m.handle))
+}
+
+func (m *Model) IsRawStorage() bool {
+	return C.hk_is_raw_storage(m.handle) != 0
+}
+
+func (m *Model) IsUniversalPageAligned() bool {
+	return C.hk_is_universal_page_aligned(m.handle) != 0
+}
+
+func (m *Model) FileAlignment() uint32 {
+	return uint32(C.hk_get_file_alignment(m.handle))
+}
+
+func (m *Model) IsTensorCoreAligned() bool {
+	return (m.FileAlignment() % 128) == 0
 }
 
 func PatchMetadataInPlace(path, key, val string) error {
@@ -481,6 +519,14 @@ func (w *Writer) AddTensor(
 
 func (w *Writer) SetSharding(splitIndex, splitCount uint16) {
 	C.hk_writer_set_sharding(w.handle, C.uint16_t(splitIndex), C.uint16_t(splitCount))
+}
+
+func (w *Writer) SetRawStorage(enabled bool) {
+	b := C.int(0)
+	if enabled {
+		b = C.int(1)
+	}
+	C.hk_writer_set_raw_storage(w.handle, b)
 }
 
 func (w *Writer) WriteToFile(path string) error {
@@ -754,4 +800,113 @@ func PlasticityMaskRows(grad []float32, cutoffRows, cols int) {
 func PlasticityMaskCols(grad []float32, rows, cutoffCols, cols int) {
 	C.hk_plasticity_mask_cols((*C.float)(&grad[0]), C.uint64_t(len(grad)), C.uint64_t(rows), C.uint64_t(cutoffCols), C.uint64_t(cols))
 }
+
+type HardwareCaps struct {
+	Vendor               uint8
+	HasAVX2              uint8
+	HasAVX512F           uint8
+	HasAVX512VNNI        uint8
+	HasAVXVNNI           uint8
+	HasAMX               uint8
+	HasARMNeon           uint8
+	HasARMSVE            uint8
+	IsAppleSilicon       uint8
+	HasROCmReady         uint8
+	HasNPUReady          uint8
+	Reserved             [5]uint8
+	OptimalPageAlignment uint64
+	DMAHugepageAlignment uint64
+}
+
+func DetectHardware() HardwareCaps {
+	var cCaps C.hk_hardware_caps_t
+	C.hk_detect_hardware(&cCaps)
+	var caps HardwareCaps
+	caps.Vendor = uint8(cCaps.vendor)
+	caps.HasAVX2 = uint8(cCaps.has_avx2)
+	caps.HasAVX512F = uint8(cCaps.has_avx512f)
+	caps.HasAVX512VNNI = uint8(cCaps.has_avx512vnni)
+	caps.HasAVXVNNI = uint8(cCaps.has_avx_vnni)
+	caps.HasAMX = uint8(cCaps.has_amx)
+	caps.HasARMNeon = uint8(cCaps.has_arm_neon)
+	caps.HasARMSVE = uint8(cCaps.has_arm_sve)
+	caps.IsAppleSilicon = uint8(cCaps.is_apple_silicon)
+	caps.HasROCmReady = uint8(cCaps.has_rocm_ready)
+	caps.HasNPUReady = uint8(cCaps.has_npu_ready)
+	caps.OptimalPageAlignment = uint64(cCaps.optimal_page_alignment)
+	caps.DMAHugepageAlignment = uint64(cCaps.dma_hugepage_alignment)
+	return caps
+}
+
+func GetOptimalAlignment() uint64 {
+	return uint64(C.hk_get_optimal_alignment())
+}
+
+func GemvBF16(w []uint16, x []float32, bias []float32, y []float32, m, k int) {
+	var biasPtr *C.float
+	if len(bias) > 0 {
+		biasPtr = (*C.float)(&bias[0])
+	}
+	C.hk_gemv_bf16(
+		(*C.uint16_t)(&w[0]),
+		(*C.float)(&x[0]),
+		biasPtr,
+		(*C.float)(&y[0]),
+		C.size_t(m),
+		C.size_t(k),
+	)
+}
+
+func GemvF16(w []uint16, x []float32, bias []float32, y []float32, m, k int) {
+	var biasPtr *C.float
+	if len(bias) > 0 {
+		biasPtr = (*C.float)(&bias[0])
+	}
+	C.hk_gemv_f16(
+		unsafe.Pointer(&w[0]),
+		(*C.float)(&x[0]),
+		biasPtr,
+		(*C.float)(&y[0]),
+		C.size_t(m),
+		C.size_t(k),
+	)
+}
+
+func GemvInt8(w []int8, x []float32, scaleW float32, bias []float32, y []float32, m, k int) {
+	var biasPtr *C.float
+	if len(bias) > 0 {
+		biasPtr = (*C.float)(&bias[0])
+	}
+	C.hk_gemv_int8(
+		(*C.int8_t)(&w[0]),
+		(*C.float)(&x[0]),
+		C.float(scaleW),
+		biasPtr,
+		(*C.float)(&y[0]),
+		C.size_t(m),
+		C.size_t(k),
+	)
+}
+
+func DotBF16(a []uint16, b []float32) float32 {
+	if len(a) != len(b) {
+		panic("length mismatch")
+	}
+	return float32(C.hk_dot_bf16((*C.uint16_t)(&a[0]), (*C.float)(&b[0]), C.size_t(len(a))))
+}
+
+func DotF16(a []uint16, b []float32) float32 {
+	if len(a) != len(b) {
+		panic("length mismatch")
+	}
+	return float32(C.hk_dot_f16(unsafe.Pointer(&a[0]), (*C.float)(&b[0]), C.size_t(len(a))))
+}
+
+func DotInt8(a, b []int8) int32 {
+	if len(a) != len(b) {
+		panic("length mismatch")
+	}
+	return int32(C.hk_dot_int8((*C.int8_t)(&a[0]), (*C.int8_t)(&b[0]), C.size_t(len(a))))
+}
+
 

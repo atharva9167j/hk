@@ -18,6 +18,11 @@ pub enum StorageType {
     Int64 = 0x07,
     UInt8 = 0x08,
     Bool = 0x09,
+    Int16 = 0x0A,
+    UInt16 = 0x0B,
+    UInt32 = 0x0C,
+    UInt64 = 0x0D,
+    F64 = 0x0E,
     DQ4 = 0x10,
     DQ8 = 0x11,
     DQ6 = 0x12,
@@ -53,6 +58,46 @@ pub enum StorageType {
 
 pub const NF4: StorageType = StorageType::DQ4;
 pub const FLAG_IS_SHARDED: u32 = 0x40;
+pub const FLAG_RAW_WEIGHT_STORAGE: u32 = 1 << 7;
+pub const FLAG_UNIVERSAL_PAGE_ALIGNED: u32 = 1 << 8;
+
+pub const DEFAULT_ALIGNMENT_BYTES: u64 = 128;
+pub const UNIVERSAL_PAGE_ALIGNMENT_BYTES: u64 = 4096;
+pub const APPLE_SILICON_ALIGNMENT_BYTES: u64 = 16384;
+pub const DIRECT_DMA_ALIGNMENT_BYTES: u64 = 65536;
+
+impl StorageType {
+    pub fn is_raw(&self) -> bool {
+        matches!(
+            self,
+            StorageType::F32
+                | StorageType::F16
+                | StorageType::BF16
+                | StorageType::FP8E4M3
+                | StorageType::FP8E5M2
+                | StorageType::Int8
+                | StorageType::Int16
+                | StorageType::Int32
+                | StorageType::Int64
+                | StorageType::UInt8
+                | StorageType::UInt16
+                | StorageType::UInt32
+                | StorageType::UInt64
+                | StorageType::Bool
+                | StorageType::F64
+        )
+    }
+
+    pub fn element_size(&self) -> usize {
+        match self {
+            StorageType::Bool | StorageType::UInt8 | StorageType::Int8 | StorageType::FP8E4M3 | StorageType::FP8E5M2 => 1,
+            StorageType::F16 | StorageType::BF16 | StorageType::Int16 | StorageType::UInt16 => 2,
+            StorageType::F32 | StorageType::Int32 | StorageType::UInt32 => 4,
+            StorageType::Int64 | StorageType::UInt64 | StorageType::F64 => 8,
+            _ => 0,
+        }
+    }
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +167,25 @@ pub struct CAppendixEntry {
     pub target: *const c_char,
     pub data: *const c_void,
     pub data_size: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct HardwareCaps {
+    pub vendor: u8,
+    pub has_avx2: u8,
+    pub has_avx512f: u8,
+    pub has_avx512vnni: u8,
+    pub has_avx_vnni: u8,
+    pub has_amx: u8,
+    pub has_arm_neon: u8,
+    pub has_arm_sve: u8,
+    pub is_apple_silicon: u8,
+    pub has_rocm_ready: u8,
+    pub has_npu_ready: u8,
+    pub reserved: [u8; 5],
+    pub optimal_page_alignment: u64,
+    pub dma_hugepage_alignment: u64,
 }
 
 pub enum HkReaderOpaque {}
@@ -267,7 +331,24 @@ extern "C" {
         data_len: u64,
         sparsity_ratio: f32,
     ) -> c_int;
+    fn hk_writer_set_raw_storage(writer: *mut HkWriterOpaque, enabled: c_int);
     fn hk_writer_write_to_file(writer: *mut HkWriterOpaque, path: *const c_char) -> c_int;
+
+    // Hardware Profiling & Zero-Copy Universal Alignment
+    fn hk_detect_hardware(out_caps: *mut HardwareCaps);
+    fn hk_get_optimal_alignment() -> usize;
+    fn hk_is_raw_storage(reader: *const HkReaderOpaque) -> c_int;
+    fn hk_is_universal_page_aligned(reader: *const HkReaderOpaque) -> c_int;
+    fn hk_get_file_alignment(reader: *const HkReaderOpaque) -> u32;
+    fn hk_get_tensor_raw_ptr(reader: *const HkReaderOpaque, index: u64, out_size: *mut u64) -> *const c_void;
+
+    // Raw Weights Linear Algebra
+    fn hk_gemv_bf16(w_bf16: *const u16, x: *const f32, bias: *const f32, y: *mut f32, m: usize, k: usize);
+    fn hk_gemv_f16(w_f16: *const c_void, x: *const f32, bias: *const f32, y: *mut f32, m: usize, k: usize);
+    fn hk_gemv_int8(w_i8: *const i8, x: *const f32, scale_w: f32, bias: *const f32, y: *mut f32, m: usize, k: usize);
+    fn hk_dot_bf16(a: *const u16, b: *const f32, len: usize) -> f32;
+    fn hk_dot_f16(a: *const c_void, b: *const f32, len: usize) -> f32;
+    fn hk_dot_int8(a: *const i8, b: *const i8, len: usize) -> i32;
 }
 
 pub struct HkTensor<'a> {
@@ -297,11 +378,18 @@ impl<'a> HkTensor<'a> {
             0x07 => StorageType::Int64,
             0x08 => StorageType::UInt8,
             0x09 => StorageType::Bool,
+            0x0A => StorageType::Int16,
+            0x0B => StorageType::UInt16,
+            0x0C => StorageType::UInt32,
+            0x0D => StorageType::UInt64,
+            0x0E => StorageType::F64,
             0x10 => StorageType::DQ4,
             0x11 => StorageType::DQ8,
             0x12 => StorageType::DQ6,
             0x13 => StorageType::DQ12,
             0x14 => StorageType::DQT,
+            0x15 => StorageType::Q4_0,
+            0x16 => StorageType::Q8_0,
             0x20 => StorageType::SparseF16,
             0x21 => StorageType::SparseDQ8,
             0x22 => StorageType::Sparse24,
@@ -309,6 +397,23 @@ impl<'a> HkTensor<'a> {
             0x30 => StorageType::NullRef,
             0x31 => StorageType::SharedRef,
             0x32 => StorageType::LoRARef,
+            0x40 => StorageType::Q2_K,
+            0x41 => StorageType::Q3_K,
+            0x42 => StorageType::Q4_K,
+            0x43 => StorageType::Q5_K,
+            0x44 => StorageType::Q6_K,
+            0x45 => StorageType::Q8_K,
+            0x50 => StorageType::IQ1_S,
+            0x51 => StorageType::IQ1_M,
+            0x52 => StorageType::IQ2_XXS,
+            0x53 => StorageType::IQ2_XS,
+            0x54 => StorageType::IQ3_XXS,
+            0x55 => StorageType::IQ4_NL,
+            0x56 => StorageType::IQ4_XS,
+            0x60 => StorageType::TQ1_0,
+            0x61 => StorageType::TQ2_0,
+            0x62 => StorageType::MXFP4,
+            0x63 => StorageType::NVFP4,
             _ => StorageType::F32,
         }
     }
@@ -407,6 +512,51 @@ impl<'a> HkTensor<'a> {
             } else {
                 std::slice::from_raw_parts(ptr as *const u8, size as usize)
             }
+        }
+    }
+
+    pub fn is_raw(&self) -> bool {
+        self.storage_type().is_raw()
+    }
+
+    pub fn raw_bytes(&self) -> &[u8] {
+        let mut size = 0u64;
+        unsafe {
+            let ptr = hk_get_tensor_raw_ptr(self.reader.raw, self.index, &mut size);
+            if ptr.is_null() || size == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(ptr as *const u8, size as usize)
+            }
+        }
+    }
+
+    pub fn as_raw_f32(&self) -> Option<&[f32]> {
+        if self.storage_type() == StorageType::F32 {
+            let bytes = self.raw_bytes();
+            let count = bytes.len() / std::mem::size_of::<f32>();
+            Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, count) })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_raw_i8(&self) -> Option<&[i8]> {
+        if self.storage_type() == StorageType::Int8 {
+            let bytes = self.raw_bytes();
+            Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const i8, bytes.len()) })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_raw_u16(&self) -> Option<&[u16]> {
+        if matches!(self.storage_type(), StorageType::BF16 | StorageType::F16 | StorageType::UInt16 | StorageType::Int16) {
+            let bytes = self.raw_bytes();
+            let count = bytes.len() / 2;
+            Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u16, count) })
+        } else {
+            None
         }
     }
 }
@@ -582,6 +732,22 @@ impl HkModel {
             Err(format!("In-place metadata patch failed for key '{}' in '{}'", key, path))
         }
     }
+
+    pub fn is_raw_storage(&self) -> bool {
+        unsafe { hk_is_raw_storage(self.raw) != 0 }
+    }
+
+    pub fn is_universal_page_aligned(&self) -> bool {
+        unsafe { hk_is_universal_page_aligned(self.raw) != 0 }
+    }
+
+    pub fn file_alignment(&self) -> u32 {
+        unsafe { hk_get_file_alignment(self.raw) }
+    }
+
+    pub fn is_tensor_core_aligned(&self) -> bool {
+        (self.file_alignment() % 128) == 0
+    }
 }
 
 impl Drop for HkModel {
@@ -610,6 +776,10 @@ impl HkWriter {
 
     pub fn set_sharding(&mut self, split_index: u16, split_count: u16) {
         unsafe { hk_writer_set_sharding(self.raw, split_index, split_count) }
+    }
+
+    pub fn set_raw_storage(&mut self, enabled: bool) {
+        unsafe { hk_writer_set_raw_storage(self.raw, if enabled { 1 } else { 0 }); }
     }
 
     pub fn add_metadata_string(&mut self, key: &str, val: &str) -> Result<(), String> {
@@ -909,4 +1079,47 @@ pub fn plasticity_mask_rows(grad: &mut [f32], cutoff_rows: usize, cols: usize) {
 pub fn plasticity_mask_cols(grad: &mut [f32], rows: usize, cutoff_cols: usize, cols: usize) {
     unsafe { hk_plasticity_mask_cols(grad.as_mut_ptr(), grad.len() as u64, rows as u64, cutoff_cols as u64, cols as u64) }
 }
+
+// Hardware Profiling
+pub fn detect_hardware() -> HardwareCaps {
+    let mut caps: HardwareCaps = unsafe { std::mem::zeroed() };
+    unsafe { hk_detect_hardware(&mut caps) };
+    caps
+}
+
+pub fn get_optimal_alignment() -> usize {
+    unsafe { hk_get_optimal_alignment() }
+}
+
+// Raw Weights Zero-Copy Linear Algebra
+pub fn gemv_bf16(w_bf16: &[u16], x: &[f32], bias: Option<&[f32]>, y: &mut [f32], m: usize, k: usize) {
+    let bias_ptr = bias.map_or(ptr::null(), |b| b.as_ptr());
+    unsafe { hk_gemv_bf16(w_bf16.as_ptr(), x.as_ptr(), bias_ptr, y.as_mut_ptr(), m, k) }
+}
+
+pub fn gemv_f16(w_f16: &[u16], x: &[f32], bias: Option<&[f32]>, y: &mut [f32], m: usize, k: usize) {
+    let bias_ptr = bias.map_or(ptr::null(), |b| b.as_ptr());
+    unsafe { hk_gemv_f16(w_f16.as_ptr() as *const c_void, x.as_ptr(), bias_ptr, y.as_mut_ptr(), m, k) }
+}
+
+pub fn gemv_int8(w_i8: &[i8], x: &[f32], scale_w: f32, bias: Option<&[f32]>, y: &mut [f32], m: usize, k: usize) {
+    let bias_ptr = bias.map_or(ptr::null(), |b| b.as_ptr());
+    unsafe { hk_gemv_int8(w_i8.as_ptr(), x.as_ptr(), scale_w, bias_ptr, y.as_mut_ptr(), m, k) }
+}
+
+pub fn dot_bf16(a: &[u16], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    unsafe { hk_dot_bf16(a.as_ptr(), b.as_ptr(), a.len()) }
+}
+
+pub fn dot_f16(a: &[u16], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    unsafe { hk_dot_f16(a.as_ptr() as *const c_void, b.as_ptr(), a.len()) }
+}
+
+pub fn dot_int8(a: &[i8], b: &[i8]) -> i32 {
+    assert_eq!(a.len(), b.len());
+    unsafe { hk_dot_int8(a.as_ptr(), b.as_ptr(), a.len()) }
+}
+
 

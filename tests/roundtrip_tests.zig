@@ -1494,6 +1494,183 @@ test "transformer engine load from reader with tiny dimensions" {
     }
 }
 
+test "hardware capabilities detection and super-coalesced alignment" {
+    const caps = hk.platform.detectHardwareCapabilities();
+    // Verify alignment requirements: must be >= 4096 and exact multiple of 128 (NVIDIA Tensor Core requirement)
+    try std.testing.expect(caps.optimal_page_alignment >= 4096);
+    try std.testing.expect((caps.optimal_page_alignment % 128) == 0);
+    try std.testing.expect((caps.dma_hugepage_alignment % 128) == 0);
+    try std.testing.expectEqual(caps.dma_hugepage_alignment, 65536);
+
+    var summary_buf: [256]u8 = undefined;
+    const summary = caps.getSummary(&summary_buf);
+    try std.testing.expect(summary.len > 0);
+}
+
+test "raw weight storage roundtrip with universal page alignment" {
+    const io = std.Options.debug_io;
+    const cwd = std.Io.Dir.cwd();
+    const allocator = std.testing.allocator;
+    const tmp_path = "test_raw_weights_universal.hk";
+    defer cwd.deleteFile(io, tmp_path) catch {};
+
+    var writer = hk.HKWriter.init(allocator);
+    defer writer.deinit();
+
+    // Configure for universal page alignment (4096) and raw weight storage
+    writer.setAlignment(hk.format.UNIVERSAL_PAGE_ALIGNMENT_BYTES);
+    writer.setRawWeightStorage(true);
+
+    const f32_data = [_]f32{ 1.0, 2.5, -3.25, 4.125 };
+    try writer.addTensor(.{
+        .name = "raw_layer.f32",
+        .storage_type = .f32,
+        .ndim = 1,
+        .shape = .{ 4, 0, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(&f32_data),
+    });
+
+    // BF16 data (represented as u16 raw bits)
+    // 1.0 in BF16 is 0x3F80, 2.0 is 0x4000
+    const bf16_data = [_]u16{ 0x3F80, 0x4000, 0xC000, 0x3E80 };
+    try writer.addTensor(.{
+        .name = "raw_layer.bf16",
+        .storage_type = .bf16,
+        .ndim = 1,
+        .shape = .{ 4, 0, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(&bf16_data),
+    });
+
+    const i8_data = [_]i8{ 10, -20, 30, -40 };
+    try writer.addTensor(.{
+        .name = "raw_layer.int8",
+        .storage_type = .int8,
+        .ndim = 1,
+        .shape = .{ 4, 0, 0, 0, 0, 0, 0, 0 },
+        .data = std.mem.sliceAsBytes(&i8_data),
+    });
+
+    try writer.writeToFile(tmp_path);
+
+    var reader = try hk.HKReader.open(tmp_path, allocator);
+    defer reader.deinit();
+
+    // Verify format properties
+    try std.testing.expect(reader.isRawWeightStorage());
+    try std.testing.expect(reader.isUniversalPageAligned());
+    try std.testing.expect(reader.isTensorCoreAligned()); // NVIDIA Tensor Core 128-byte coalescing
+    try std.testing.expectEqual(hk.format.UNIVERSAL_PAGE_ALIGNMENT_BYTES, reader.getAlignment());
+
+    // Verify zero-copy raw typed retrieval
+    const e_f32 = reader.toc.find("raw_layer.f32").?;
+    const read_f32 = try reader.getRawF32(e_f32);
+    try std.testing.expectEqual(4, read_f32.len);
+    try std.testing.expectEqual(1.0, read_f32[0]);
+    try std.testing.expectEqual(2.5, read_f32[1]);
+
+    const e_bf16 = reader.toc.find("raw_layer.bf16").?;
+    const read_bf16 = try reader.getRawBF16(e_bf16);
+    try std.testing.expectEqual(4, read_bf16.len);
+    try std.testing.expectEqual(@as(u16, 0x3F80), read_bf16[0]);
+    // Check direct conversion to f32
+    try std.testing.expectEqual(@as(f32, 1.0), hk.tensor_ops.bf16ToF32(read_bf16[0]));
+    try std.testing.expectEqual(@as(f32, 2.0), hk.tensor_ops.bf16ToF32(read_bf16[1]));
+
+    const e_i8 = reader.toc.find("raw_layer.int8").?;
+    const read_i8 = try reader.getRawInt8(e_i8);
+    try std.testing.expectEqual(4, read_i8.len);
+    try std.testing.expectEqual(@as(i8, 10), read_i8[0]);
+    try std.testing.expectEqual(@as(i8, -20), read_i8[1]);
+}
+
+test "raw weight storage split mode sharding" {
+    const io = std.Options.debug_io;
+    const cwd = std.Io.Dir.cwd();
+    const allocator = std.testing.allocator;
+    const shard0_path = "test_raw_shard0.hk";
+    const shard1_path = "test_raw_shard1.hk";
+    defer cwd.deleteFile(io, shard0_path) catch {};
+    defer cwd.deleteFile(io, shard1_path) catch {};
+
+    // Shard 0
+    {
+        var w0 = hk.HKWriter.init(allocator);
+        defer w0.deinit();
+        w0.setAlignment(hk.format.UNIVERSAL_PAGE_ALIGNMENT_BYTES);
+        w0.setRawWeightStorage(true);
+        w0.setSharding(0, 2);
+
+        const d0 = [_]f32{ 1.0, 2.0 };
+        try w0.addTensor(.{
+            .name = "part0.weight",
+            .storage_type = .f32,
+            .ndim = 1,
+            .shape = .{ 2, 0, 0, 0, 0, 0, 0, 0 },
+            .data = std.mem.sliceAsBytes(&d0),
+        });
+        try w0.writeToFile(shard0_path);
+    }
+
+    // Shard 1
+    {
+        var w1 = hk.HKWriter.init(allocator);
+        defer w1.deinit();
+        w1.setAlignment(hk.format.UNIVERSAL_PAGE_ALIGNMENT_BYTES);
+        w1.setRawWeightStorage(true);
+        w1.setSharding(1, 2);
+
+        const d1 = [_]f32{ 3.0, 4.0 };
+        try w1.addTensor(.{
+            .name = "part1.weight",
+            .storage_type = .f32,
+            .ndim = 1,
+            .shape = .{ 2, 0, 0, 0, 0, 0, 0, 0 },
+            .data = std.mem.sliceAsBytes(&d1),
+        });
+        try w1.writeToFile(shard1_path);
+    }
+
+    // Read and verify shards
+    var r0 = try hk.HKReader.open(shard0_path, allocator);
+    defer r0.deinit();
+    try std.testing.expect(r0.isSharded());
+    try std.testing.expect(r0.isRawWeightStorage());
+    try std.testing.expect(r0.isTensorCoreAligned());
+    try std.testing.expectEqual(@as(u16, 0), r0.getSplitIndex());
+    try std.testing.expectEqual(@as(u16, 2), r0.getSplitCount());
+
+    var r1 = try hk.HKReader.open(shard1_path, allocator);
+    defer r1.deinit();
+    try std.testing.expect(r1.isSharded());
+    try std.testing.expect(r1.isRawWeightStorage());
+    try std.testing.expect(r1.isTensorCoreAligned());
+    try std.testing.expectEqual(@as(u16, 1), r1.getSplitIndex());
+    try std.testing.expectEqual(@as(u16, 2), r1.getSplitCount());
+}
+
+test "raw BF16 and F16 GEMV mathematical correctness" {
+    // 2x2 matrix:
+    // [ 1.0, 2.0 ]
+    // [ 3.0, 4.0 ]
+    // BF16 bit patterns:
+    // 1.0 = 0x3F80, 2.0 = 0x4000, 3.0 = 0x4040, 4.0 = 0x4080
+    const w_bf16 = [_]u16{ 0x3F80, 0x4000, 0x4040, 0x4080 };
+    const x = [_]f32{ 0.5, -1.0 };
+    var y: [2]f32 = undefined;
+
+    // y[0] = 1.0*0.5 + 2.0*(-1.0) = 0.5 - 2.0 = -1.5
+    // y[1] = 3.0*0.5 + 4.0*(-1.0) = 1.5 - 4.0 = -2.5
+    hk.tensor_ops.gemvBF16(&w_bf16, &x, null, &y, 2, 2);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.5), y[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.5), y[1], 1e-5);
+
+    // FP16 test
+    const w_f16 = [_]f16{ 1.0, 2.0, 3.0, 4.0 };
+    hk.tensor_ops.gemvF16(&w_f16, &x, null, &y, 2, 2);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.5), y[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.5), y[1], 1e-5);
+}
+
 
 
 

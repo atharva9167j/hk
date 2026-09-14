@@ -17,6 +17,7 @@ const hf_mapper_mod = @import("hf_mapper.zig");
 const context_mod = @import("context.zig");
 const pipeline_mod = @import("pipeline.zig");
 const adaptive_mod = @import("adaptive.zig");
+const platform_mod = @import("platform.zig");
 
 pub const hk_reader_t = opaque {};
 
@@ -1087,6 +1088,12 @@ pub export fn hk_writer_destroy(writer_ptr: ?*hk_writer_t) void {
     std.heap.page_allocator.destroy(wrapper);
 }
 
+pub export fn hk_writer_set_raw_storage(writer_ptr: ?*hk_writer_t, enabled: c_int) void {
+    if (writer_ptr == null) return;
+    const wrapper: *WriterWrapper = @ptrCast(@alignCast(writer_ptr));
+    wrapper.writer.setRawWeightStorage(enabled != 0);
+}
+
 pub export fn hk_writer_add_metadata_string(writer_ptr: ?*hk_writer_t, key_c: [*:0]const u8, val_c: [*:0]const u8) c_int {
     if (writer_ptr == null) return -1;
     const wrapper: *WriterWrapper = @ptrCast(@alignCast(writer_ptr));
@@ -1620,6 +1627,128 @@ pub export fn hk_init_plasticity_mask(
     const mask_slice = mask[0..total_units];
     adaptive_mod.initPlasticityMask(mask_slice, total_units, base_units, decay_rate);
     return 0;
+}
+
+pub const C_HardwareCapabilities = extern struct {
+    vendor: u8,
+    has_avx2: u8,
+    has_avx512f: u8,
+    has_avx512vnni: u8,
+    has_avx_vnni: u8,
+    has_amx: u8,
+    has_arm_neon: u8,
+    has_arm_sve: u8,
+    is_apple_silicon: u8,
+    has_rocm_ready: u8,
+    has_npu_ready: u8,
+    reserved: [5]u8 = [_]u8{0} ** 5,
+    optimal_page_alignment: u64,
+    dma_hugepage_alignment: u64,
+};
+
+pub export fn hk_detect_hardware(out_caps: ?*C_HardwareCapabilities) void {
+    if (out_caps == null) return;
+    const caps = platform_mod.detectHardwareCapabilities();
+    out_caps.?.* = .{
+        .vendor = @intFromEnum(caps.vendor),
+        .has_avx2 = if (caps.has_avx2) 1 else 0,
+        .has_avx512f = if (caps.has_avx512f) 1 else 0,
+        .has_avx512vnni = if (caps.has_avx512vnni) 1 else 0,
+        .has_avx_vnni = if (caps.has_avx_vnni) 1 else 0,
+        .has_amx = if (caps.has_amx) 1 else 0,
+        .has_arm_neon = if (caps.has_arm_neon) 1 else 0,
+        .has_arm_sve = if (caps.has_arm_sve) 1 else 0,
+        .is_apple_silicon = if (caps.is_apple_silicon) 1 else 0,
+        .has_rocm_ready = if (caps.has_rocm_ready) 1 else 0,
+        .has_npu_ready = if (caps.has_npu_ready) 1 else 0,
+        .reserved = [_]u8{0} ** 5,
+        .optimal_page_alignment = @intCast(caps.optimal_page_alignment),
+        .dma_hugepage_alignment = @intCast(caps.dma_hugepage_alignment),
+    };
+}
+
+pub export fn hk_get_optimal_alignment() usize {
+    const caps = platform_mod.detectHardwareCapabilities();
+    return caps.optimal_page_alignment;
+}
+
+pub export fn hk_is_raw_storage(reader_ptr: ?*const hk_reader_t) c_int {
+    if (reader_ptr == null) return 0;
+    const wrapper: *const ReaderWrapper = @ptrCast(@alignCast(reader_ptr));
+    return if (wrapper.reader.isRawWeightStorage()) 1 else 0;
+}
+
+pub export fn hk_is_universal_page_aligned(reader_ptr: ?*const hk_reader_t) c_int {
+    if (reader_ptr == null) return 0;
+    const wrapper: *const ReaderWrapper = @ptrCast(@alignCast(reader_ptr));
+    return if (wrapper.reader.isUniversalPageAligned()) 1 else 0;
+}
+
+pub export fn hk_get_file_alignment(reader_ptr: ?*const hk_reader_t) u32 {
+    if (reader_ptr == null) return 128;
+    const wrapper: *const ReaderWrapper = @ptrCast(@alignCast(reader_ptr));
+    return @intCast(wrapper.reader.getAlignment());
+}
+
+pub export fn hk_get_tensor_raw_ptr(reader_ptr: ?*const hk_reader_t, index: u64, out_size: ?*u64) ?*const anyopaque {
+    if (reader_ptr == null) return null;
+    const wrapper: *const ReaderWrapper = @ptrCast(@alignCast(reader_ptr));
+    if (index >= wrapper.reader.toc.entries.items.len) return null;
+    const entry = wrapper.reader.toc.entries.items[index];
+    const data_bytes = wrapper.reader.getRawTensorBytes(entry) catch return null;
+    if (out_size) |sz| {
+        sz.* = data_bytes.len;
+    }
+    return @ptrCast(data_bytes.ptr);
+}
+
+pub export fn hk_gemv_bf16(
+    w_bf16: [*]const u16,
+    x: [*]const f32,
+    bias: ?[*]const f32,
+    y: [*]f32,
+    m: usize,
+    k: usize,
+) void {
+    const b_slice: ?[]const f32 = if (bias) |b| b[0..m] else null;
+    tensor_ops_mod.gemvBF16(w_bf16[0 .. m * k], x[0..k], b_slice, y[0..m], m, k);
+}
+
+pub export fn hk_gemv_f16(
+    w_f16: [*]const f16,
+    x: [*]const f32,
+    bias: ?[*]const f32,
+    y: [*]f32,
+    m: usize,
+    k: usize,
+) void {
+    const b_slice: ?[]const f32 = if (bias) |b| b[0..m] else null;
+    tensor_ops_mod.gemvF16(w_f16[0 .. m * k], x[0..k], b_slice, y[0..m], m, k);
+}
+
+pub export fn hk_gemv_int8(
+    w_i8: [*]const i8,
+    x: [*]const f32,
+    scale_w: f32,
+    bias: ?[*]const f32,
+    y: [*]f32,
+    m: usize,
+    k: usize,
+) void {
+    const b_slice: ?[]const f32 = if (bias) |b| b[0..m] else null;
+    tensor_ops_mod.gemvInt8Scaled(w_i8[0 .. m * k], x[0..k], scale_w, b_slice, y[0..m], m, k);
+}
+
+pub export fn hk_dot_bf16(a: [*]const u16, b: [*]const f32, len: usize) f32 {
+    return tensor_ops_mod.dotProductBF16(a[0..len], b[0..len]);
+}
+
+pub export fn hk_dot_f16(a: [*]const f16, b: [*]const f32, len: usize) f32 {
+    return tensor_ops_mod.dotProductF16(a[0..len], b[0..len]);
+}
+
+pub export fn hk_dot_int8(a: [*]const i8, b: [*]const i8, len: usize) i32 {
+    return tensor_ops_mod.dotProductInt8(a[0..len], b[0..len]);
 }
 
 

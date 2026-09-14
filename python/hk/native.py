@@ -85,8 +85,62 @@ class C_TensorInfo(ctypes.Structure):
         ("sparsity_ratio", ctypes.c_float),
     ]
 
+class C_HardwareCapabilities(ctypes.Structure):
+    _fields_ = [
+        ("vendor", ctypes.c_uint8),
+        ("has_avx2", ctypes.c_uint8),
+        ("has_avx512f", ctypes.c_uint8),
+        ("has_avx512vnni", ctypes.c_uint8),
+        ("has_avx_vnni", ctypes.c_uint8),
+        ("has_amx", ctypes.c_uint8),
+        ("has_arm_neon", ctypes.c_uint8),
+        ("has_arm_sve", ctypes.c_uint8),
+        ("is_apple_silicon", ctypes.c_uint8),
+        ("has_rocm_ready", ctypes.c_uint8),
+        ("has_npu_ready", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 5),
+        ("optimal_page_alignment", ctypes.c_uint64),
+        ("dma_hugepage_alignment", ctypes.c_uint64),
+    ]
+
 # Setup function signatures if library loaded
 if _LIB is not None:
+    if hasattr(_LIB, "hk_detect_hardware"):
+        _LIB.hk_detect_hardware.argtypes = [ctypes.POINTER(C_HardwareCapabilities)]
+        _LIB.hk_detect_hardware.restype = None
+    if hasattr(_LIB, "hk_get_optimal_alignment"):
+        _LIB.hk_get_optimal_alignment.argtypes = []
+        _LIB.hk_get_optimal_alignment.restype = ctypes.c_size_t
+    if hasattr(_LIB, "hk_is_raw_storage"):
+        _LIB.hk_is_raw_storage.argtypes = [ctypes.c_void_p]
+        _LIB.hk_is_raw_storage.restype = ctypes.c_int
+    if hasattr(_LIB, "hk_is_universal_page_aligned"):
+        _LIB.hk_is_universal_page_aligned.argtypes = [ctypes.c_void_p]
+        _LIB.hk_is_universal_page_aligned.restype = ctypes.c_int
+    if hasattr(_LIB, "hk_get_file_alignment"):
+        _LIB.hk_get_file_alignment.argtypes = [ctypes.c_void_p]
+        _LIB.hk_get_file_alignment.restype = ctypes.c_uint32
+    if hasattr(_LIB, "hk_get_tensor_raw_ptr"):
+        _LIB.hk_get_tensor_raw_ptr.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint64)]
+        _LIB.hk_get_tensor_raw_ptr.restype = ctypes.c_void_p
+    if hasattr(_LIB, "hk_gemv_bf16"):
+        _LIB.hk_gemv_bf16.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_size_t]
+        _LIB.hk_gemv_bf16.restype = None
+    if hasattr(_LIB, "hk_gemv_f16"):
+        _LIB.hk_gemv_f16.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_size_t]
+        _LIB.hk_gemv_f16.restype = None
+    if hasattr(_LIB, "hk_gemv_int8"):
+        _LIB.hk_gemv_int8.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_float, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_size_t]
+        _LIB.hk_gemv_int8.restype = None
+    if hasattr(_LIB, "hk_dot_bf16"):
+        _LIB.hk_dot_bf16.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+        _LIB.hk_dot_bf16.restype = ctypes.c_float
+    if hasattr(_LIB, "hk_dot_f16"):
+        _LIB.hk_dot_f16.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+        _LIB.hk_dot_f16.restype = ctypes.c_float
+    if hasattr(_LIB, "hk_dot_int8"):
+        _LIB.hk_dot_int8.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        _LIB.hk_dot_int8.restype = ctypes.c_int32
     # Reader API
     _LIB.hk_open.argtypes = [ctypes.c_char_p]
     _LIB.hk_open.restype = ctypes.c_void_p
@@ -359,6 +413,10 @@ if _LIB is not None:
     if hasattr(_LIB, "hk_writer_set_sharding"):
         _LIB.hk_writer_set_sharding.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16]
         _LIB.hk_writer_set_sharding.restype = None
+
+    if hasattr(_LIB, "hk_writer_set_raw_storage"):
+        _LIB.hk_writer_set_raw_storage.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        _LIB.hk_writer_set_raw_storage.restype = None
 
     if hasattr(_LIB, "hk_quantize_block_q4_0"):
         _LIB.hk_quantize_block_q4_0.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_uint32, ctypes.c_void_p]
@@ -1576,6 +1634,10 @@ class NativeHKWriter:
         if _LIB is not None and hasattr(_LIB, "hk_writer_set_sharding"):
             _LIB.hk_writer_set_sharding(self.ptr, ctypes.c_uint16(split_index), ctypes.c_uint16(split_count))
 
+    def set_raw_storage(self, enabled: bool = True):
+        if _LIB is not None and hasattr(_LIB, "hk_writer_set_raw_storage"):
+            _LIB.hk_writer_set_raw_storage(self.ptr, ctypes.c_int(1 if enabled else 0))
+
     def add_metadata_string(self, key: str, value: str):
         err = _LIB.hk_writer_add_metadata_string(self.ptr, key.encode("utf-8"), value.encode("utf-8"))
         if err != 0:
@@ -1721,6 +1783,9 @@ class NativeHKReader:
                     self.split_index = split_index
                     self.split_count = split_count
                     self.is_sharded = bool(flags & 0x00000040 or split_count > 1)
+                    self.is_raw_storage = bool(flags & 0x00000080)
+                    self.is_universal_page_aligned = bool(flags & 0x00000100)
+                    self.is_tensor_core_aligned = bool((align % 128) == 0)
                     self.header = types.SimpleNamespace(
                         magic=magic,
                         version_major=ver_maj,
@@ -1826,6 +1891,36 @@ class NativeHKReader:
             return b""
         buf = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * size.value))
         return bytes(buf.contents)
+
+    def get_tensor_raw(self, name: str) -> np.ndarray:
+        """Returns a zero-copy NumPy array mapped directly to raw tensor bytes without decoding overhead."""
+        if name not in self.tensors:
+            raise KeyError(f"Tensor {name} not found")
+        meta = self.tensors[name]
+        idx = meta["index"]
+        shape = meta["shape"]
+        stype = meta["storage_type"]
+        size = ctypes.c_uint64(0)
+
+        if _LIB is not None and hasattr(_LIB, "hk_get_tensor_raw_ptr"):
+            ptr = _LIB.hk_get_tensor_raw_ptr(self.ptr, idx, ctypes.byref(size))
+        else:
+            ptr = _LIB.hk_get_tensor_data(self.ptr, idx, ctypes.byref(size))
+
+        if not ptr or size.value == 0:
+            return np.empty(shape, dtype=np.float32)
+
+        from .format import STORAGE_TO_NUMPY_DTYPE
+        np_dtype = STORAGE_TO_NUMPY_DTYPE.get(stype, np.float32)
+        if np_dtype == np.float16:
+            ptr_typed = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint16))
+            numel = int(np.prod(shape)) if shape else (size.value // 2)
+            arr = np.ctypeslib.as_array(ptr_typed, shape=(numel,)).view(np.float16)
+        else:
+            ptr_typed = ctypes.cast(ptr, ctypes.POINTER(np.ctypeslib.as_ctypes_type(np_dtype)))
+            numel = int(np.prod(shape)) if shape else (size.value // np_dtype.itemsize)
+            arr = np.ctypeslib.as_array(ptr_typed, shape=(numel,))
+        return arr.reshape(shape) if shape else arr
 
     def get_metadata_string(self, key: str) -> Optional[str]:
         val = _LIB.hk_get_metadata_string(self.ptr, key.encode("utf-8"))
@@ -2233,6 +2328,161 @@ def native_expand_vocab_embeddings(
     if ret == 0:
         return new_embed
     return None
+
+
+def native_detect_hardware() -> Dict[str, Any]:
+    """Detects host CPU vendor, vector extensions, and optimal zero-copy page alignment."""
+    if not is_native_available() or not hasattr(_LIB, "hk_detect_hardware"):
+        # Fallback Python detection
+        import platform as _plat
+        mach = _plat.machine().lower()
+        sys_name = _plat.system().lower()
+        is_apple = ("darwin" in sys_name and ("arm" in mach or "aarch64" in mach))
+        return {
+            "vendor": "apple" if is_apple else ("arm" if ("arm" in mach or "aarch64" in mach) else "x86_64"),
+            "has_avx2": "x86" in mach or "amd64" in mach,
+            "has_avx512f": False,
+            "has_avx512vnni": False,
+            "has_avx_vnni": False,
+            "has_amx": False,
+            "has_arm_neon": "arm" in mach or "aarch64" in mach,
+            "has_arm_sve": False,
+            "is_apple_silicon": is_apple,
+            "has_rocm_ready": True,
+            "has_npu_ready": True,
+            "optimal_page_alignment": 16384 if is_apple else 4096,
+            "dma_hugepage_alignment": 65536,
+        }
+
+    caps = C_HardwareCapabilities()
+    _LIB.hk_detect_hardware(ctypes.byref(caps))
+    vendors = {0: "intel", 1: "amd", 2: "arm", 3: "apple", 4: "generic"}
+    return {
+        "vendor": vendors.get(caps.vendor, "unknown"),
+        "has_avx2": bool(caps.has_avx2),
+        "has_avx512f": bool(caps.has_avx512f),
+        "has_avx512vnni": bool(caps.has_avx512vnni),
+        "has_avx_vnni": bool(caps.has_avx_vnni),
+        "has_amx": bool(caps.has_amx),
+        "has_arm_neon": bool(caps.has_arm_neon),
+        "has_arm_sve": bool(caps.has_arm_sve),
+        "is_apple_silicon": bool(caps.is_apple_silicon),
+        "has_rocm_ready": bool(caps.has_rocm_ready),
+        "has_npu_ready": bool(caps.has_npu_ready),
+        "optimal_page_alignment": int(caps.optimal_page_alignment),
+        "dma_hugepage_alignment": int(caps.dma_hugepage_alignment),
+    }
+
+
+def native_get_optimal_alignment() -> int:
+    """Returns optimal page alignment for zero-copy memory mapping on current hardware."""
+    if is_native_available() and hasattr(_LIB, "hk_get_optimal_alignment"):
+        return int(_LIB.hk_get_optimal_alignment())
+    import platform as _plat
+    if "darwin" in _plat.system().lower() and ("arm" in _plat.machine().lower() or "aarch64" in _plat.machine().lower()):
+        return 16384
+    return 4096
+
+
+def native_gemv_bf16(
+    w: np.ndarray,
+    x: np.ndarray,
+    bias: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Fast Matrix-Vector Multiplication with raw BF16 weights: y = W_bf16 * x + bias."""
+    M, K = w.shape
+    y = np.empty(M, dtype=np.float32)
+    x_f32 = np.ascontiguousarray(x, dtype=np.float32)
+    b_ptr = None
+    if bias is not None:
+        b_f32 = np.ascontiguousarray(bias, dtype=np.float32)
+        b_ptr = b_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    if is_native_available() and hasattr(_LIB, "hk_gemv_bf16"):
+        w_u16 = np.ascontiguousarray(w.view(np.uint16) if w.dtype != np.uint16 else w)
+        _LIB.hk_gemv_bf16(
+            w_u16.ctypes.data_as(ctypes.c_void_p),
+            x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            b_ptr,
+            y.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(M),
+            ctypes.c_size_t(K),
+        )
+    else:
+        # High-performance numpy fallback
+        if w.dtype == np.uint16:
+            w_f32 = (w.astype(np.uint32) << 16).view(np.float32)
+        else:
+            w_f32 = w.astype(np.float32)
+        y = np.dot(w_f32, x_f32)
+        if bias is not None:
+            y += bias
+    return y
+
+
+def native_gemv_f16(
+    w: np.ndarray,
+    x: np.ndarray,
+    bias: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Fast Matrix-Vector Multiplication with raw FP16 weights: y = W_f16 * x + bias."""
+    M, K = w.shape
+    y = np.empty(M, dtype=np.float32)
+    x_f32 = np.ascontiguousarray(x, dtype=np.float32)
+    b_ptr = None
+    if bias is not None:
+        b_f32 = np.ascontiguousarray(bias, dtype=np.float32)
+        b_ptr = b_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    if is_native_available() and hasattr(_LIB, "hk_gemv_f16"):
+        w_f16 = np.ascontiguousarray(w, dtype=np.float16)
+        _LIB.hk_gemv_f16(
+            w_f16.ctypes.data_as(ctypes.c_void_p),
+            x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            b_ptr,
+            y.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(M),
+            ctypes.c_size_t(K),
+        )
+    else:
+        w_f32 = w.astype(np.float32)
+        y = np.dot(w_f32, x_f32)
+        if bias is not None:
+            y += bias
+    return y
+
+
+def native_gemv_int8(
+    w: np.ndarray,
+    x: np.ndarray,
+    scale: float = 1.0,
+    bias: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Fast Matrix-Vector Multiplication with raw INT8 weights: y = (W_i8 * x) * scale + bias."""
+    M, K = w.shape
+    y = np.empty(M, dtype=np.float32)
+    x_f32 = np.ascontiguousarray(x, dtype=np.float32)
+    b_ptr = None
+    if bias is not None:
+        b_f32 = np.ascontiguousarray(bias, dtype=np.float32)
+        b_ptr = b_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    if is_native_available() and hasattr(_LIB, "hk_gemv_int8"):
+        w_i8 = np.ascontiguousarray(w, dtype=np.int8)
+        _LIB.hk_gemv_int8(
+            w_i8.ctypes.data_as(ctypes.c_void_p),
+            x_f32.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_float(scale),
+            b_ptr,
+            y.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(M),
+            ctypes.c_size_t(K),
+        )
+    else:
+        y = np.dot(w.astype(np.float32), x_f32) * scale
+        if bias is not None:
+            y += bias
+    return y
 
 
 

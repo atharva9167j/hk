@@ -12,7 +12,11 @@ import numpy as np
 MAGIC = b"HKNT"
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
+DEFAULT_ALIGNMENT_BYTES = 128
 ALIGNMENT_BYTES = 128
+UNIVERSAL_PAGE_ALIGNMENT_BYTES = 4096
+APPLE_SILICON_ALIGNMENT_BYTES = 16384
+DIRECT_DMA_ALIGNMENT_BYTES = 65536
 HEADER_SIZE = 128
 
 # Storage Types
@@ -26,6 +30,11 @@ STORAGE_INT32 = 0x06
 STORAGE_INT64 = 0x07
 STORAGE_UINT8 = 0x08
 STORAGE_BOOL = 0x09
+STORAGE_INT16 = 0x0A
+STORAGE_UINT16 = 0x0B
+STORAGE_UINT32 = 0x0C
+STORAGE_UINT64 = 0x0D
+STORAGE_F64 = 0x0E
 STORAGE_DQ4 = 0x10
 STORAGE_DQ8 = 0x11
 STORAGE_DQ6 = 0x12
@@ -80,6 +89,11 @@ class StorageType(IntEnum):
     INT64 = STORAGE_INT64
     UINT8 = STORAGE_UINT8
     BOOL = STORAGE_BOOL
+    INT16 = STORAGE_INT16
+    UINT16 = STORAGE_UINT16
+    UINT32 = STORAGE_UINT32
+    UINT64 = STORAGE_UINT64
+    F64 = STORAGE_F64
     DQ4 = STORAGE_DQ4
     DQ8 = STORAGE_DQ8
     DQ6 = STORAGE_DQ6
@@ -164,15 +178,19 @@ FLAG_HAS_APPENDIX = 0x00000002
 FLAG_ENCRYPTED = 0x00000004
 FLAG_STRICT_128B = 0x00000008
 FLAG_IS_SHARDED = 0x00000040
+FLAG_RAW_WEIGHT_STORAGE = 0x00000080
+FLAG_UNIVERSAL_PAGE_ALIGNED = 0x00000100
 
 TORCH_DTYPE_TO_STORAGE = {
     torch.float32: STORAGE_F32,
     torch.float16: STORAGE_F16,
     torch.bfloat16: STORAGE_BF16,
     torch.int8: STORAGE_INT8,
+    torch.int16: STORAGE_INT16,
     torch.int32: STORAGE_INT32,
     torch.int64: STORAGE_INT64,
     torch.uint8: STORAGE_UINT8,
+    torch.float64: STORAGE_F64,
     torch.bool: STORAGE_BOOL,
 }
 
@@ -181,10 +199,43 @@ STORAGE_TO_TORCH_DTYPE = {
     STORAGE_F16: torch.float16,
     STORAGE_BF16: torch.bfloat16,
     STORAGE_INT8: torch.int8,
+    STORAGE_INT16: torch.int16,
     STORAGE_INT32: torch.int32,
     STORAGE_INT64: torch.int64,
     STORAGE_UINT8: torch.uint8,
+    STORAGE_F64: torch.float64,
     STORAGE_BOOL: torch.bool,
+}
+
+NUMPY_DTYPE_TO_STORAGE = {
+    np.dtype('float32'): STORAGE_F32,
+    np.dtype('float16'): STORAGE_F16,
+    np.dtype('int8'): STORAGE_INT8,
+    np.dtype('int16'): STORAGE_INT16,
+    np.dtype('int32'): STORAGE_INT32,
+    np.dtype('int64'): STORAGE_INT64,
+    np.dtype('uint8'): STORAGE_UINT8,
+    np.dtype('uint16'): STORAGE_UINT16,
+    np.dtype('uint32'): STORAGE_UINT32,
+    np.dtype('uint64'): STORAGE_UINT64,
+    np.dtype('float64'): STORAGE_F64,
+    np.dtype('bool'): STORAGE_BOOL,
+}
+
+STORAGE_TO_NUMPY_DTYPE = {
+    STORAGE_F32: np.float32,
+    STORAGE_F16: np.float16,
+    STORAGE_BF16: np.uint16,
+    STORAGE_INT8: np.int8,
+    STORAGE_INT16: np.int16,
+    STORAGE_INT32: np.int32,
+    STORAGE_INT64: np.int64,
+    STORAGE_UINT8: np.uint8,
+    STORAGE_UINT16: np.uint16,
+    STORAGE_UINT32: np.uint32,
+    STORAGE_UINT64: np.uint64,
+    STORAGE_F64: np.float64,
+    STORAGE_BOOL: np.bool_,
 }
 
 

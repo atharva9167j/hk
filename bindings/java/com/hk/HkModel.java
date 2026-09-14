@@ -32,6 +32,11 @@ public final class HkModel implements Closeable, AutoCloseable {
         public static final byte INT64 = 0x07;
         public static final byte UINT8 = 0x08;
         public static final byte BOOL = 0x09;
+        public static final byte INT16 = 0x0A;
+        public static final byte UINT16 = 0x0B;
+        public static final byte UINT32 = 0x0C;
+        public static final byte UINT64 = 0x0D;
+        public static final byte F64 = 0x0E;
         public static final byte DQ4 = 0x10;
         public static final byte NF4 = 0x10;
         public static final byte DQ8 = 0x11;
@@ -64,6 +69,17 @@ public final class HkModel implements Closeable, AutoCloseable {
         public static final byte TQ2_0 = 0x61;
         public static final byte MXFP4 = 0x62;
         public static final byte NVFP4 = 0x63;
+    }
+
+    public static final class Constants {
+        public static final int FLAG_IS_SHARDED = 0x40;
+        public static final int FLAG_RAW_WEIGHT_STORAGE = 1 << 7;
+        public static final int FLAG_UNIVERSAL_PAGE_ALIGNED = 1 << 8;
+
+        public static final long DEFAULT_ALIGNMENT_BYTES = 128;
+        public static final long UNIVERSAL_PAGE_ALIGNMENT_BYTES = 4096;
+        public static final long APPLE_SILICON_ALIGNMENT_BYTES = 16384;
+        public static final long DIRECT_DMA_ALIGNMENT_BYTES = 65536;
     }
 
     public static final class TileLayout {
@@ -181,6 +197,25 @@ public final class HkModel implements Closeable, AutoCloseable {
         return nativeGetAppendixEntry(nativeHandle, index);
     }
 
+    public boolean isRawStorage() {
+        checkClosed();
+        return nativeIsRawStorage(nativeHandle) != 0;
+    }
+
+    public boolean isUniversalPageAligned() {
+        checkClosed();
+        return nativeIsUniversalPageAligned(nativeHandle) != 0;
+    }
+
+    public int getFileAlignment() {
+        checkClosed();
+        return nativeGetFileAlignment(nativeHandle);
+    }
+
+    public boolean isTensorCoreAligned() {
+        return (getFileAlignment() % 128) == 0;
+    }
+
     public static void rollback(String path, int targetGeneration) throws IOException {
         int res = nativeRollback(path, targetGeneration);
         if (res != 0) {
@@ -266,6 +301,28 @@ public final class HkModel implements Closeable, AutoCloseable {
         public ByteBuffer getRawScales() {
             return nativeGetTensorScales(modelHandle, index);
         }
+
+        public boolean isRaw() {
+            return storageType == StorageType.F32 ||
+                   storageType == StorageType.F16 ||
+                   storageType == StorageType.BF16 ||
+                   storageType == StorageType.FP8_E4M3 ||
+                   storageType == StorageType.FP8_E5M2 ||
+                   storageType == StorageType.INT8 ||
+                   storageType == StorageType.INT16 ||
+                   storageType == StorageType.INT32 ||
+                   storageType == StorageType.INT64 ||
+                   storageType == StorageType.UINT8 ||
+                   storageType == StorageType.UINT16 ||
+                   storageType == StorageType.UINT32 ||
+                   storageType == StorageType.UINT64 ||
+                   storageType == StorageType.BOOL ||
+                   storageType == StorageType.F64;
+        }
+
+        public ByteBuffer getRawBytes() {
+            return nativeGetTensorRawPtr(modelHandle, index);
+        }
     }
 
     public static class HkAppendixEntry {
@@ -312,6 +369,11 @@ public final class HkModel implements Closeable, AutoCloseable {
         public void setSharding(int splitIndex, int splitCount) {
             checkClosed();
             nativeWriterSetSharding(nativeWriterHandle, splitIndex, splitCount);
+        }
+
+        public void setRawStorage(boolean enabled) {
+            checkClosed();
+            nativeWriterSetRawStorage(nativeWriterHandle, enabled ? 1 : 0);
         }
 
         public void addMetadataString(String key, String val) {
@@ -395,11 +457,16 @@ public final class HkModel implements Closeable, AutoCloseable {
     private static native long nativeGetAppendixCount(long handle);
     private static native HkAppendixEntry nativeGetAppendixEntry(long handle, long index);
     private static native int nativeRollback(String path, int targetGeneration);
+    private static native int nativeIsRawStorage(long handle);
+    private static native int nativeIsUniversalPageAligned(long handle);
+    private static native int nativeGetFileAlignment(long handle);
+    private static native ByteBuffer nativeGetTensorRawPtr(long handle, long index);
 
     // Native JNI Writer functions
     private static native long nativeWriterCreate(long alignment);
     private static native void nativeWriterDestroy(long writerHandle);
     private static native void nativeWriterSetSharding(long writerHandle, int splitIndex, int splitCount);
+    private static native void nativeWriterSetRawStorage(long writerHandle, int enabled);
     private static native int nativeWriterAddMetadataString(long writerHandle, String key, String val);
     private static native int nativeWriterAddMetadataInt(long writerHandle, String key, long val);
     private static native int nativeWriterAddMetadataFloat(long writerHandle, String key, double val);

@@ -54,8 +54,24 @@ from . import pruning
 from . import benchmark
 from . import adaptive
 from . import numpy
+from . import raw
 from . import gui
 from .gui import launch_gui
+from .raw import (
+    HKRawWeightStore,
+    save_raw,
+    load_raw,
+    save_sharded_raw,
+    load_sharded_raw,
+    to_amd_rocm,
+    to_intel_npu,
+    to_apple_metal,
+    to_nvidia_tensor_core,
+)
+from .native import (
+    native_detect_hardware,
+    native_get_optimal_alignment,
+)
 try:
     from . import jax
     from . import flax
@@ -186,4 +202,16 @@ __all__ = [
     "RemoteHKFile",
     "gui",
     "launch_gui",
+    "raw",
+    "HKRawWeightStore",
+    "save_raw",
+    "load_raw",
+    "save_sharded_raw",
+    "load_sharded_raw",
+    "to_amd_rocm",
+    "to_intel_npu",
+    "to_apple_metal",
+    "to_nvidia_tensor_core",
+    "native_detect_hardware",
+    "native_get_optimal_alignment",
 ]

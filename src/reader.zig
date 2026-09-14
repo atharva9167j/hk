@@ -61,12 +61,59 @@ pub const HKReader = struct {
         return (self.header.flags & format.HeaderFlags.IS_SHARDED) != 0 or self.header.split_count > 1;
     }
 
+    pub fn isRawWeightStorage(self: *const HKReader) bool {
+        return (self.header.flags & format.HeaderFlags.RAW_WEIGHT_STORAGE) != 0;
+    }
+
+    pub fn isUniversalPageAligned(self: *const HKReader) bool {
+        return (self.header.flags & format.HeaderFlags.UNIVERSAL_PAGE_ALIGNED) != 0;
+    }
+
+    pub fn isTensorCoreAligned(self: *const HKReader) bool {
+        return (self.header.flags & format.HeaderFlags.TILE_ALIGNED) != 0;
+    }
+
+    pub fn getAlignment(self: *const HKReader) usize {
+        return self.header.alignment;
+    }
+
     pub fn getSplitIndex(self: *const HKReader) u16 {
         return self.header.split_index;
     }
 
     pub fn getSplitCount(self: *const HKReader) u16 {
         return self.header.split_count;
+    }
+
+    /// Zero-copy raw byte slice for raw tensor storage
+    pub fn getRawTensorBytes(self: *const HKReader, entry: format.TensorEntry) ![]const u8 {
+        return self.getTensorData(entry);
+    }
+
+    pub fn getRawF32(self: *const HKReader, entry: format.TensorEntry) ![]const f32 {
+        const bytes = try self.getTensorData(entry);
+        if ((bytes.len % @sizeOf(f32)) != 0) return error.InvalidByteLength;
+        const count = bytes.len / @sizeOf(f32);
+        return @as([*]const f32, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+    }
+
+    pub fn getRawF16(self: *const HKReader, entry: format.TensorEntry) ![]const f16 {
+        const bytes = try self.getTensorData(entry);
+        if ((bytes.len % @sizeOf(f16)) != 0) return error.InvalidByteLength;
+        const count = bytes.len / @sizeOf(f16);
+        return @as([*]const f16, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+    }
+
+    pub fn getRawBF16(self: *const HKReader, entry: format.TensorEntry) ![]const u16 {
+        const bytes = try self.getTensorData(entry);
+        if ((bytes.len % @sizeOf(u16)) != 0) return error.InvalidByteLength;
+        const count = bytes.len / @sizeOf(u16);
+        return @as([*]const u16, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+    }
+
+    pub fn getRawInt8(self: *const HKReader, entry: format.TensorEntry) ![]const i8 {
+        const bytes = try self.getTensorData(entry);
+        return @as([*]const i8, @ptrCast(bytes.ptr))[0..bytes.len];
     }
 
     /// Zero-copy pointer to tensor payload directly inside mapped file buffer
@@ -175,6 +222,76 @@ pub const HKReader = struct {
             const i8_slice: []const i8 = @as([*]const i8, @ptrCast(data_bytes.ptr))[0..out.len];
             for (0..out.len) |i| {
                 out[i] = @floatFromInt(i8_slice[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .uint8) {
+            for (0..out.len) |i| {
+                out[i] = @floatFromInt(data_bytes[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .int16) {
+            const s = @as([*]const i16, @ptrCast(@alignCast(data_bytes.ptr)))[0..out.len];
+            for (0..out.len) |i| {
+                out[i] = @floatFromInt(s[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .uint16) {
+            const s = @as([*]const u16, @ptrCast(@alignCast(data_bytes.ptr)))[0..out.len];
+            for (0..out.len) |i| {
+                out[i] = @floatFromInt(s[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .int32) {
+            const s = @as([*]const i32, @ptrCast(@alignCast(data_bytes.ptr)))[0..out.len];
+            for (0..out.len) |i| {
+                out[i] = @floatFromInt(s[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .uint32) {
+            const s = @as([*]const u32, @ptrCast(@alignCast(data_bytes.ptr)))[0..out.len];
+            for (0..out.len) |i| {
+                out[i] = @floatFromInt(s[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .int64) {
+            const s = @as([*]const i64, @ptrCast(@alignCast(data_bytes.ptr)))[0..out.len];
+            for (0..out.len) |i| {
+                out[i] = @floatFromInt(s[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .uint64) {
+            const s = @as([*]const u64, @ptrCast(@alignCast(data_bytes.ptr)))[0..out.len];
+            for (0..out.len) |i| {
+                out[i] = @floatFromInt(s[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .f64) {
+            const s = @as([*]const f64, @ptrCast(@alignCast(data_bytes.ptr)))[0..out.len];
+            for (0..out.len) |i| {
+                out[i] = @floatCast(s[i]);
+            }
+            return;
+        }
+
+        if (entry.storage_type == .bool) {
+            for (0..out.len) |i| {
+                out[i] = if (data_bytes[i] != 0) 1.0 else 0.0;
             }
             return;
         }

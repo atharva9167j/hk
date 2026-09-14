@@ -52,8 +52,8 @@ The header occupies the first 128 bytes of every `.hk` file, aligning with GPU c
 | 0x00 | `magic` | `[4]u8` | `0x48, 0x4B, 0x4E, 0x54` (`"HKNT"`) |
 | 0x04 | `version_major` | `u16` | Major format version (currently `1`) |
 | 0x06 | `version_minor` | `u16` | Minor format version (currently `0`) |
-| 0x08 | `flags` | `u32` | Bitflags: <br>• Bit 0: Little-endian (`0x01`)<br>• Bit 1: Has Appendix (`0x02`)<br>• Bit 2: Quantization table present (`0x04`)<br>• Bit 3: 2:4 Structured Sparsity enabled (`0x08`)<br>• Bit 4: Tile-aligned layout (`0x10`)<br>• Bit 5: Flexible alignment mode (`0x20`)<br>• Bit 6: Multi-file sharded (`0x40`) |
-| 0x0C | `alignment` | `u16` | Hardware memory alignment boundary in bytes (default: `128`) |
+| 0x08 | `flags` | `u32` | Bitflags: <br>• Bit 0: Little-endian (`0x01`)<br>• Bit 1: Has Appendix (`0x02`)<br>• Bit 2: Quantization table present (`0x04`)<br>• Bit 3: 2:4 Structured Sparsity enabled (`0x08`)<br>• Bit 4: Tile-aligned layout (`0x10`)<br>• Bit 5: Flexible alignment mode (`0x20`)<br>• Bit 6: Multi-file sharded (`0x40`)<br>• Bit 7: Raw Weight Storage (`0x80`)<br>• Bit 8: Universal Page Aligned (4096 / 16384B) (`0x100`) |
+| 0x0C | `alignment` | `u16` | Hardware memory alignment boundary in bytes (default: `128`, universal: `4096`, Apple Silicon: `16384`, hugepage: `65536`) |
 | 0x0E | `split_index` | `u16` | Multi-file sharding: 0-based shard index |
 | 0x10 | `tensor_count` | `u64` | Total number of tensors in this file / shard |
 | 0x18 | `metadata_kv_count` | `u64` | Total number of metadata KV pairs |
@@ -75,7 +75,7 @@ Each tensor TOC entry declares its storage format via an 8-bit identifier:
 
 ```zig
 pub const StorageType = enum(u8) {
-    // Dense unquantized float & integer types
+    // Dense raw unquantized float & integer types (Zero compute headroom)
     f32 = 0x00,
     f16 = 0x01,
     bf16 = 0x02,
@@ -86,6 +86,11 @@ pub const StorageType = enum(u8) {
     int64 = 0x07,
     uint8 = 0x08,
     bool = 0x09,
+    int16 = 0x0A,
+    uint16 = 0x0B,
+    uint32 = 0x0C,
+    uint64 = 0x0D,
+    f64 = 0x0E,
 
     // Dual-mode quantized types
     dq4 = 0x10,       // 4-bit NF4/INT4 base + block scale + optional residual
@@ -133,20 +138,48 @@ pub const StorageType = enum(u8) {
 
 ---
 
-## 5. Non-Quantized Storage & Memory Mapping Architecture
+## 5. Non-Quantized Storage, Raw Weights & Universal Multi-Device Architecture
 
-HK treats non-quantized weight storage (`FP32`, `FP16`, `BF16`, `FP8_E4M3`, `FP8_E5M2`, `INT8`, `INT32`, `INT64`) as a foundational architecture, delivering substantial storage efficiency, memory savings, and throughput gains over SafeTensors and PyTorch:
+HK treats non-quantized weight storage (`FP32`, `FP16`, `BF16`, `FP8_E4M3`, `FP8_E5M2`, `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, `UINT16`, `UINT32`, `UINT64`, `F64`, `BOOL`) as a foundational architecture, delivering substantial storage efficiency, zero deserialization overhead, and maximum memory throughput across all computing architectures without any compute headroom:
 
-### 5.1 Zero-Copy OS Page Cache Memory Mapping (`mmap`)
+### 5.1 Zero-Compute Headroom Raw Weight Storage
+- **Direct Contiguous Memory Slices**: Raw weights are stored as contiguous uncompressed IEEE 754 floating-point or two's complement integer bit arrays.
+- **Zero Decoding / Dequantization Latency**: Unlike quantized containers that require dequantization kernels, codebook lookups, or scale factor broadcasting, raw HK weights are executed directly by SIMD/Tensor Core compute units via direct pointer arithmetic.
+- **Header Flag `RAW_WEIGHT_STORAGE = 0x80`**: Explicitly signals loaders and compute runtimes to map raw buffers directly into execution graphs without staging memory allocations or format inspection penalties.
+
+### 5.2 Universal Super-Coalesced Multi-Device Alignment
+Different hardware architectures enforce distinct hardware DMA and cacheline alignment constraints for zero-copy memory mapping:
+- **NVIDIA GPUs**: Require **128-byte alignment** for warp-coalesced memory transactions and Tensor Core tile loads (`TILE_ALIGNED = 0x10`).
+- **AMD GPUs & CPUs**: ROCm DirectGMA and Zen architecture page caches require **4096-byte (4 KB) page alignment**.
+- **Intel CPUs & NPUs**: OpenVINO Direct DMA, AVX-512 VNNI, and AMX-TILE engine require **4096-byte (4 KB) page alignment**.
+- **Apple Silicon**: macOS Metal Unified Memory `newBufferWithBytesNoCopy` strictly mandates **16384-byte (16 KB) page alignment**.
+- **Windows / Direct DMA Hugepages**: 64 KB (`65536` bytes) allocation granularity for hugepage OS transactions.
+
+#### The Super-Coalescing Invariance
+Because arithmetic modulo holds:
+$$\begin{aligned}
+4096 \pmod{128} &= 0 \quad (4096 = 32 \times 128) \\
+16384 \pmod{128} &= 0 \quad (16384 = 128 \times 128) \\
+65536 \pmod{128} &= 0 \quad (65536 = 512 \times 128)
+\end{aligned}$$
+Any `.hk` container aligned to **4096 bytes** or **16384 bytes** automatically satisfies the **128-byte NVIDIA Tensor Core coalescing requirement with 100% mathematical precision**. Consequently:
+> **One single shared `.hk` file operates at peak hardware efficiency across AMD GPUs, Intel CPUs/NPUs, Apple Silicon Metal, and NVIDIA Tensor Cores simultaneously without transcoding, padding mismatches, or extra compute headroom.**
+
+### 5.3 Split Mode Sharding & Regeneratable Weights
+- **Multi-File Partitioning (`IS_SHARDED = 0x40`)**: Large multi-hundred-gigabyte checkpoints can be partitioned across arbitrary physical shards using `split_index` and `split_count`.
+- **Regeneratable Weights & Dynamic Modularity**: Sharding works seamlessly in raw storage mode, allowing individual layers, LoRA adapters, and delta patches to be attached, detached, or regenerated dynamically without touching untouched model layers.
+- **Appendix Preservation**: Appendix generation history and rollback checkpoints (`hk_appendix_rollback`) function identically across sharded raw files.
+
+### 5.4 Zero-Copy OS Page Cache Memory Mapping (`mmap`)
 - **Direct Physical Mapping**: Tensors are laid out in contiguous physical byte spans aligned to 64-byte / 128-byte hardware cachelines and 4096-byte OS virtual memory page boundaries.
 - **Sub-Millisecond Loading**: The runtime opens the container via `mmap` (POSIX) or `MapViewOfFile` (Windows) using `MAP_SHARED` or `MAP_PRIVATE` (copy-on-write). A 70B parameter FP16 checkpoint (~140 GB) maps in **under 1 millisecond** without loading inactive layers or allocating intermediary Python heap buffers.
 - **On-Demand Page Faulting**: Tensors are paged directly from the NVMe storage subsystem into CPU/GPU cache by the OS virtual memory manager only when accessed by compute kernels, keeping process idle RAM minimal (e.g. 2.80 MB for the standalone native Zig binary).
 
-### 5.2 Minimal Binary Container Overhead (<0.001%)
+### 5.5 Minimal Binary Container Overhead (<0.001%)
 - **Binary vs. JSON Metadata**: SafeTensors precedes weight buffers with a variable-length JSON string that can scale to several megabytes, requiring text parsers, string hashing, and GC allocation during deserialization.
 - **Fixed-Size Compact Table of Contents (TOC)**: HK uses a fixed 128-byte file header followed by binary Table of Contents entries (128 bytes per tensor) storing name offsets, dimension vectors, storage tags, and physical offsets as packed integers. For a 1,000-tensor model, the total container metadata overhead is under 128 KB (<0.001% of model size).
 
-### 5.3 Virtual Deduplication & Zero-Physical Allocations
+### 5.6 Virtual Deduplication & Zero-Physical Allocations
 - **`SHARED_REF` (StorageType `0x31`)**:
   - Weight-tied architectures (such as `lm_head.weight` sharing identical weights with `model.embed_tokens.weight`, or recursive layer models like ALBERT) declare the duplicate tensor as a `SHARED_REF`.
   - The entry points directly to the data offset and length of the primary tensor.

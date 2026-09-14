@@ -17,6 +17,11 @@ namespace Hk
         INT64 = 0x07,
         UINT8 = 0x08,
         BOOL = 0x09,
+        INT16 = 0x0A,
+        UINT16 = 0x0B,
+        UINT32 = 0x0C,
+        UINT64 = 0x0D,
+        F64 = 0x0E,
         DQ4 = 0x10,
         NF4 = 0x10,
         DQ8 = 0x11,
@@ -49,6 +54,38 @@ namespace Hk
         TQ2_0 = 0x61,
         MXFP4 = 0x62,
         NVFP4 = 0x63
+    }
+
+    public static class HkConstants
+    {
+        public const uint FlagIsSharded = 0x40;
+        public const uint FlagRawWeightStorage = 1 << 7;
+        public const uint FlagUniversalPageAligned = 1 << 8;
+
+        public const ulong DefaultAlignmentBytes = 128;
+        public const ulong UniversalPageAlignmentBytes = 4096;
+        public const ulong AppleSiliconAlignmentBytes = 16384;
+        public const ulong DirectDmaAlignmentBytes = 65536;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct HardwareCaps
+    {
+        public byte Vendor;
+        public byte HasAvx2;
+        public byte HasAvx512f;
+        public byte HasAvx512vnni;
+        public byte HasAvxVnni;
+        public byte HasAmx;
+        public byte HasArmNeon;
+        public byte HasArmSve;
+        public byte IsAppleSilicon;
+        public byte HasRocmReady;
+        public byte HasNpuReady;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 5)]
+        public byte[] Reserved;
+        public ulong OptimalPageAlignment;
+        public ulong DmaHugepageAlignment;
     }
 
     public enum TileLayout : byte
@@ -252,7 +289,48 @@ namespace Hk
         public static extern int hk_writer_add_tensor(IntPtr writer, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, byte storage_type, byte tile_layout, byte sparsity_type, byte ndim, [In] ulong[] shape, [In] byte[] data, ulong data_len, float sparsity_ratio);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void hk_writer_set_raw_storage(IntPtr writer, int enabled);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int hk_writer_write_to_file(IntPtr writer, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+        // Hardware Profiling & Zero-Copy Universal Alignment
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void hk_detect_hardware(ref HardwareCaps out_caps);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern ulong hk_get_optimal_alignment();
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int hk_is_raw_storage(IntPtr reader);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int hk_is_universal_page_aligned(IntPtr reader);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint hk_get_file_alignment(IntPtr reader);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr hk_get_tensor_raw_ptr(IntPtr reader, ulong index, ref ulong out_size);
+
+        // Raw Linear Algebra Kernels
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void hk_gemv_bf16(IntPtr w_bf16, [In] float[] x, [In] float[]? bias, [Out] float[] y, ulong m, ulong k);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void hk_gemv_f16(IntPtr w_f16, [In] float[] x, [In] float[]? bias, [Out] float[] y, ulong m, ulong k);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void hk_gemv_int8(IntPtr w_i8, [In] float[] x, float scale_w, [In] float[]? bias, [Out] float[] y, ulong m, ulong k);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern float hk_dot_bf16(IntPtr a, [In] float[] b, ulong len);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern float hk_dot_f16(IntPtr a, [In] float[] b, ulong len);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int hk_dot_int8(IntPtr a, IntPtr b, ulong len);
     }
 
     public sealed class HkTensor
@@ -342,6 +420,45 @@ namespace Hk
             byte[] bytes = new byte[size];
             Marshal.Copy(ptr, bytes, 0, (int)size);
             return bytes;
+        }
+
+        public bool IsRaw
+        {
+            get
+            {
+                return StorageType == StorageType.F32 ||
+                       StorageType == StorageType.F16 ||
+                       StorageType == StorageType.BF16 ||
+                       StorageType == StorageType.FP8_E4M3 ||
+                       StorageType == StorageType.FP8_E5M2 ||
+                       StorageType == StorageType.INT8 ||
+                       StorageType == StorageType.INT16 ||
+                       StorageType == StorageType.INT32 ||
+                       StorageType == StorageType.INT64 ||
+                       StorageType == StorageType.UINT8 ||
+                       StorageType == StorageType.UINT16 ||
+                       StorageType == StorageType.UINT32 ||
+                       StorageType == StorageType.UINT64 ||
+                       StorageType == StorageType.BOOL ||
+                       StorageType == StorageType.F64;
+            }
+        }
+
+        public byte[] GetRawBytes()
+        {
+            ulong size = 0;
+            IntPtr ptr = NativeMethods.hk_get_tensor_raw_ptr(_reader, _index, ref size);
+            if (ptr == IntPtr.Zero || size == 0) return Array.Empty<byte>();
+
+            byte[] bytes = new byte[size];
+            Marshal.Copy(ptr, bytes, 0, (int)size);
+            return bytes;
+        }
+
+        public IntPtr GetRawPointer(out ulong size)
+        {
+            size = 0;
+            return NativeMethods.hk_get_tensor_raw_ptr(_reader, _index, ref size);
         }
     }
 
@@ -505,6 +622,44 @@ namespace Hk
             }
         }
 
+        public bool IsRawStorage
+        {
+            get
+            {
+                ThrowIfDisposed();
+                return NativeMethods.hk_is_raw_storage(_reader) != 0;
+            }
+        }
+
+        public bool IsUniversalPageAligned
+        {
+            get
+            {
+                ThrowIfDisposed();
+                return NativeMethods.hk_is_universal_page_aligned(_reader) != 0;
+            }
+        }
+
+        public uint FileAlignment
+        {
+            get
+            {
+                ThrowIfDisposed();
+                return NativeMethods.hk_get_file_alignment(_reader);
+            }
+        }
+
+        public bool IsTensorCoreAligned => (FileAlignment % 128) == 0;
+
+        public static HardwareCaps DetectHardware()
+        {
+            var caps = new HardwareCaps();
+            NativeMethods.hk_detect_hardware(ref caps);
+            return caps;
+        }
+
+        public static ulong GetOptimalAlignment() => NativeMethods.hk_get_optimal_alignment();
+
         private void ThrowIfDisposed()
         {
             if (_disposed) throw new ObjectDisposedException(nameof(HkModel));
@@ -542,6 +697,12 @@ namespace Hk
         {
             ThrowIfDisposed();
             NativeMethods.hk_writer_set_sharding(_writer, splitIndex, splitCount);
+        }
+
+        public void SetRawStorage(bool enabled)
+        {
+            ThrowIfDisposed();
+            NativeMethods.hk_writer_set_raw_storage(_writer, enabled ? 1 : 0);
         }
 
         public void AddMetadataString(string key, string val)

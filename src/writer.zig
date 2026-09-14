@@ -28,6 +28,7 @@ pub const HKWriter = struct {
     split_index: u16 = 0,
     split_count: u16 = 1,
     is_sharded: bool = false,
+    raw_weight_storage: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) HKWriter {
         return .{
@@ -38,11 +39,16 @@ pub const HKWriter = struct {
             .split_index = 0,
             .split_count = 1,
             .is_sharded = false,
+            .raw_weight_storage = false,
         };
     }
 
     pub fn setAlignment(self: *HKWriter, align_bytes: usize) void {
         self.alignment = if (align_bytes == 0) 1 else align_bytes;
+    }
+
+    pub fn setRawWeightStorage(self: *HKWriter, enabled: bool) void {
+        self.raw_weight_storage = enabled;
     }
 
     pub fn setSharding(self: *HKWriter, split_index: u16, split_count: u16) void {
@@ -179,7 +185,20 @@ pub const HKWriter = struct {
         const final_toc_bytes = final_toc_writer.getBytes();
 
         // Prepare Header
-        var flags: u32 = format.HeaderFlags.LITTLE_ENDIAN | (if (self.alignment == 128) format.HeaderFlags.TILE_ALIGNED else format.HeaderFlags.FLEXIBLE_ALIGNMENT);
+        var flags: u32 = format.HeaderFlags.LITTLE_ENDIAN;
+        if ((self.alignment % format.DEFAULT_ALIGNMENT_BYTES) == 0) {
+            // Preserves NVIDIA Tensor Core 128-byte coalescing alignment
+            flags |= format.HeaderFlags.TILE_ALIGNED;
+        } else {
+            flags |= format.HeaderFlags.FLEXIBLE_ALIGNMENT;
+        }
+        if (self.alignment >= format.UNIVERSAL_PAGE_ALIGNMENT_BYTES) {
+            // Super-coalesced multi-device page alignment (AMD ROCm, Intel NPU, Apple Metal)
+            flags |= format.HeaderFlags.UNIVERSAL_PAGE_ALIGNED;
+        }
+        if (self.raw_weight_storage) {
+            flags |= format.HeaderFlags.RAW_WEIGHT_STORAGE;
+        }
         if (self.is_sharded or self.split_count > 1) {
             flags |= format.HeaderFlags.IS_SHARDED;
         }

@@ -26,9 +26,14 @@ from .format import (
     STORAGE_F16,
     STORAGE_BF16,
     STORAGE_INT8,
+    STORAGE_INT16,
     STORAGE_INT32,
     STORAGE_INT64,
     STORAGE_UINT8,
+    STORAGE_UINT16,
+    STORAGE_UINT32,
+    STORAGE_UINT64,
+    STORAGE_F64,
     STORAGE_BOOL,
     STORAGE_DQ4,
     STORAGE_DQ8,
@@ -123,8 +128,11 @@ def save_file(
         raise ValueError("save_file requires a destination filename")
 
     path_str = str(filename)
-    writer = NativeHKWriter(alignment=kwargs.get("alignment", 128))
+    align = kwargs.get("alignment", 4096 if kwargs.get("universal_alignment", False) else 128)
+    writer = NativeHKWriter(alignment=align)
     try:
+        if kwargs.get("raw_storage", False):
+            writer.set_raw_storage(True)
         if split_count > 1:
             writer.set_sharding(split_index, split_count)
 
@@ -917,12 +925,22 @@ class HKFile:
             np_dtype = np.int16
         elif st == STORAGE_INT8:
             np_dtype = np.int8
+        elif st == STORAGE_INT16:
+            np_dtype = np.int16
         elif st == STORAGE_INT32:
             np_dtype = np.int32
         elif st == STORAGE_INT64:
             np_dtype = np.int64
         elif st == STORAGE_UINT8:
             np_dtype = np.uint8
+        elif st == STORAGE_UINT16:
+            np_dtype = np.uint16
+        elif st == STORAGE_UINT32:
+            np_dtype = np.uint32
+        elif st == STORAGE_UINT64:
+            np_dtype = np.uint64
+        elif st == STORAGE_F64:
+            np_dtype = np.float64
         elif st == STORAGE_BOOL:
             np_dtype = np.bool_
         else:

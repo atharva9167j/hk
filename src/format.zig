@@ -4,8 +4,11 @@ const std = @import("std");
 pub const MAGIC: [4]u8 = .{ 0x48, 0x4B, 0x4E, 0x54 };
 pub const VERSION_MAJOR: u16 = 1;
 pub const VERSION_MINOR: u16 = 0;
-pub const DEFAULT_ALIGNMENT_BYTES: usize = 128; // Default Tensor Core coalescing alignment
+pub const DEFAULT_ALIGNMENT_BYTES: usize = 128; // Default NVIDIA Tensor Core coalescing alignment
 pub const ALIGNMENT_BYTES: usize = 128;
+pub const UNIVERSAL_PAGE_ALIGNMENT_BYTES: usize = 4096; // Standard Multi-Device Page Alignment (AMD ROCm, Intel NPU, x86_64, Linux ARM)
+pub const APPLE_SILICON_ALIGNMENT_BYTES: usize = 16384; // Apple Silicon Metal zero-copy GPU page alignment (16 KB)
+pub const DIRECT_DMA_ALIGNMENT_BYTES: usize = 65536; // 64 KB hugepage / Windows allocation granularity
 
 pub const HeaderFlags = struct {
     pub const LITTLE_ENDIAN: u32 = 1 << 0;
@@ -15,6 +18,8 @@ pub const HeaderFlags = struct {
     pub const TILE_ALIGNED: u32 = 1 << 4;
     pub const FLEXIBLE_ALIGNMENT: u32 = 1 << 5; // Relaxed alignment for arbitrary portable devices
     pub const IS_SHARDED: u32 = 1 << 6; // Multi-file sharding flag
+    pub const RAW_WEIGHT_STORAGE: u32 = 1 << 7; // Raw unquantized IEEE weights for zero compute headroom
+    pub const UNIVERSAL_PAGE_ALIGNED: u32 = 1 << 8; // Super-coalesced hardware page aligned (4KB / 16KB / 64KB)
 };
 
 pub const StorageType = enum(u8) {
@@ -29,6 +34,11 @@ pub const StorageType = enum(u8) {
     int64 = 0x07,
     uint8 = 0x08,
     bool = 0x09,
+    int16 = 0x0A,
+    uint16 = 0x0B,
+    uint32 = 0x0C,
+    uint64 = 0x0D,
+    f64 = 0x0E,
 
     // Dual-mode quantized types
     dq4 = 0x10, // 4-bit dual-mode (NF4/INT4 base + block scale + optional residual)
@@ -78,6 +88,23 @@ pub const StorageType = enum(u8) {
     tq2_0 = 0x61, // 2-bit ternary quantization
     mxfp4 = 0x62, // OCP Microscaling FP4 (E2M1 with E8M0 scale)
     nvfp4 = 0x63, // NVIDIA Blackwell FP4 (E2M1 with FP8 scale)
+
+    pub fn isRaw(self: StorageType) bool {
+        return switch (self) {
+            .f32, .f16, .bf16, .fp8_e4m3, .fp8_e5m2, .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64, .f64, .bool => true,
+            else => false,
+        };
+    }
+
+    pub fn elementSize(self: StorageType) usize {
+        return switch (self) {
+            .f32, .int32, .uint32 => 4,
+            .f16, .bf16, .int16, .uint16 => 2,
+            .int8, .uint8, .bool, .fp8_e4m3, .fp8_e5m2 => 1,
+            .int64, .uint64, .f64 => 8,
+            else => 1,
+        };
+    }
 };
 
 pub const TileLayout = enum(u8) {

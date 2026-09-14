@@ -29,6 +29,11 @@ typedef enum {
     HK_STORAGE_INT64 = 0x07,
     HK_STORAGE_UINT8 = 0x08,
     HK_STORAGE_BOOL = 0x09,
+    HK_STORAGE_INT16 = 0x0A,
+    HK_STORAGE_UINT16 = 0x0B,
+    HK_STORAGE_UINT32 = 0x0C,
+    HK_STORAGE_UINT64 = 0x0D,
+    HK_STORAGE_F64 = 0x0E,
     HK_STORAGE_DQ4 = 0x10,
     HK_STORAGE_DQ8 = 0x11,
     HK_STORAGE_DQ6 = 0x12,
@@ -316,6 +321,7 @@ typedef struct hk_writer_t hk_writer_t;
 HK_API hk_writer_t* hk_writer_create(uint64_t alignment);
 HK_API void hk_writer_destroy(hk_writer_t* writer);
 HK_API void hk_writer_set_sharding(hk_writer_t* writer, uint16_t split_index, uint16_t split_count);
+HK_API void hk_writer_set_raw_storage(hk_writer_t* writer, int enabled);
 HK_API int hk_writer_add_metadata_string(hk_writer_t* writer, const char* key, const char* val);
 HK_API int hk_writer_add_metadata_int(hk_writer_t* writer, const char* key, int64_t val);
 HK_API int hk_writer_add_metadata_float(hk_writer_t* writer, const char* key, double val);
@@ -423,6 +429,48 @@ HK_API int hk_init_plasticity_mask(
     size_t base_units,
     float decay_rate
 );
+
+// Multi-Device Alignment Constants & Flags
+#define HK_DEFAULT_ALIGNMENT_BYTES 128
+#define HK_UNIVERSAL_PAGE_ALIGNMENT_BYTES 4096
+#define HK_APPLE_SILICON_ALIGNMENT_BYTES 16384
+#define HK_DIRECT_DMA_ALIGNMENT_BYTES 65536
+
+#define HK_FLAG_RAW_WEIGHT_STORAGE (1 << 7)
+#define HK_FLAG_UNIVERSAL_PAGE_ALIGNED (1 << 8)
+
+typedef struct {
+    uint8_t vendor;
+    uint8_t has_avx2;
+    uint8_t has_avx512f;
+    uint8_t has_avx512vnni;
+    uint8_t has_avx_vnni;
+    uint8_t has_amx;
+    uint8_t has_arm_neon;
+    uint8_t has_arm_sve;
+    uint8_t is_apple_silicon;
+    uint8_t has_rocm_ready;
+    uint8_t has_npu_ready;
+    uint8_t reserved[5];
+    uint64_t optimal_page_alignment;
+    uint64_t dma_hugepage_alignment;
+} hk_hardware_caps_t;
+
+// Hardware Profiling & Zero-Copy Universal Alignment
+HK_API void hk_detect_hardware(hk_hardware_caps_t* out_caps);
+HK_API size_t hk_get_optimal_alignment(void);
+HK_API int hk_is_raw_storage(const hk_reader_t* reader);
+HK_API int hk_is_universal_page_aligned(const hk_reader_t* reader);
+HK_API uint32_t hk_get_file_alignment(const hk_reader_t* reader);
+HK_API const void* hk_get_tensor_raw_ptr(const hk_reader_t* reader, uint64_t index, uint64_t* out_size);
+
+// Raw Weights Linear Algebra (Zero-Copy GEMV & Dot Products)
+HK_API void hk_gemv_bf16(const uint16_t* w_bf16, const float* x, const float* bias, float* y, size_t m, size_t k);
+HK_API void hk_gemv_f16(const void* w_f16, const float* x, const float* bias, float* y, size_t m, size_t k);
+HK_API void hk_gemv_int8(const int8_t* w_i8, const float* x, float scale_w, const float* bias, float* y, size_t m, size_t k);
+HK_API float hk_dot_bf16(const uint16_t* a, const float* b, size_t len);
+HK_API float hk_dot_f16(const void* a, const float* b, size_t len);
+HK_API int32_t hk_dot_int8(const int8_t* a, const int8_t* b, size_t len);
 
 #ifdef __cplusplus
 }

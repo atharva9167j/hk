@@ -10,6 +10,141 @@ pub const MmapRegion = struct {
     }
 };
 
+pub const CpuVendor = enum(u8) {
+    intel = 0,
+    amd = 1,
+    arm = 2,
+    apple = 3,
+    unknown = 4,
+};
+
+pub const HardwareCapabilities = struct {
+    vendor: CpuVendor = .unknown,
+    has_avx2: bool = false,
+    has_avx512f: bool = false,
+    has_avx512vnni: bool = false,
+    has_avx_vnni: bool = false,
+    has_amx: bool = false,
+    has_arm_neon: bool = false,
+    has_arm_sve: bool = false,
+    is_apple_silicon: bool = false,
+    has_rocm_ready: bool = false,
+    has_npu_ready: bool = false,
+    optimal_page_alignment: usize = 4096, // 4KB default (ROCm / Intel NPU / x86_64)
+    dma_hugepage_alignment: usize = 65536, // 64KB Direct DMA / Windows page allocation granularity
+
+    pub fn getSummary(self: HardwareCapabilities, buf_out: []u8) []const u8 {
+        const vendor_name = switch (self.vendor) {
+            .intel => "Intel",
+            .amd => "AMD",
+            .arm => "ARM",
+            .apple => "Apple Silicon",
+            .unknown => "Generic",
+        };
+        return std.fmt.bufPrint(buf_out, "Vendor: {s}, AVX2: {}, AVX-512: {}, VNNI: {}, NEON: {}, PageAlign: {}B", .{
+            vendor_name,
+            self.has_avx2,
+            self.has_avx512f,
+            self.has_avx512vnni or self.has_avx_vnni,
+            self.has_arm_neon,
+            self.optimal_page_alignment,
+        }) catch "HardwareCapabilities";
+    }
+};
+
+/// Detect runtime hardware capabilities of current host machine
+pub fn detectHardwareCapabilities() HardwareCapabilities {
+    var caps = HardwareCapabilities{};
+    const arch = @import("builtin").cpu.arch;
+    const os_tag = @import("builtin").os.tag;
+
+    if (arch == .x86_64) {
+        // x86_64 CPU feature detection via cpuid
+        // On x86_64, safe cpuid
+        const info0 = cpuidSafe(0, 0);
+        if (info0.max_leaf >= 1) {
+            // Check vendor string: GenuineIntel or AuthenticAMD
+            // ebx, edx, ecx
+            var vendor_str: [12]u8 = undefined;
+            @memcpy(vendor_str[0..4], std.mem.asBytes(&info0.ebx));
+            @memcpy(vendor_str[4..8], std.mem.asBytes(&info0.edx));
+            @memcpy(vendor_str[8..12], std.mem.asBytes(&info0.ecx));
+
+            if (std.mem.eql(u8, &vendor_str, "GenuineIntel")) {
+                caps.vendor = .intel;
+                caps.has_npu_ready = true; // Intel OpenVINO / NPU ready
+            } else if (std.mem.eql(u8, &vendor_str, "AuthenticAMD")) {
+                caps.vendor = .amd;
+                caps.has_rocm_ready = true; // AMD ROCm / Ryzen AI ready
+            }
+
+            const info1 = cpuidSafe(1, 0);
+            _ = info1;
+
+            if (info0.max_leaf >= 7) {
+                const info7 = cpuidSafe(7, 0);
+                caps.has_avx2 = (info7.ebx & (1 << 5)) != 0;
+                caps.has_avx512f = (info7.ebx & (1 << 16)) != 0;
+                caps.has_avx512vnni = (info7.ecx & (1 << 11)) != 0;
+                caps.has_amx = (info7.edx & (1 << 24)) != 0; // AMX-TILE
+
+                const info7_1 = cpuidSafe(7, 1);
+                caps.has_avx_vnni = (info7_1.eax & (1 << 4)) != 0;
+            }
+        }
+        caps.optimal_page_alignment = 4096;
+    } else if (arch == .aarch64 or arch == .arm) {
+        caps.vendor = .arm;
+        caps.has_arm_neon = true; // Standard on ARMv8-A
+        if (os_tag == .macos) {
+            caps.vendor = .apple;
+            caps.is_apple_silicon = true;
+            // Apple Silicon Metal requires 16KB (16384 bytes) page alignment for zero-copy GPU buffers
+            caps.optimal_page_alignment = 16384;
+        } else {
+            caps.optimal_page_alignment = 4096;
+        }
+    }
+
+    return caps;
+}
+
+const CpuidResult = struct {
+    max_leaf: u32 = 0,
+    eax: u32 = 0,
+    ebx: u32 = 0,
+    ecx: u32 = 0,
+    edx: u32 = 0,
+};
+
+fn cpuidSafe(leaf: u32, subleaf: u32) CpuidResult {
+    const arch = @import("builtin").cpu.arch;
+    if (arch != .x86_64) return .{};
+
+    var eax: u32 = 0;
+    var ebx: u32 = 0;
+    var ecx: u32 = 0;
+    var edx: u32 = 0;
+
+    asm volatile (
+        \\cpuid
+        : [eax] "={eax}" (eax),
+          [ebx] "={ebx}" (ebx),
+          [ecx] "={ecx}" (ecx),
+          [edx] "={edx}" (edx),
+        : [leaf] "{eax}" (leaf),
+          [subleaf] "{ecx}" (subleaf),
+    );
+
+    return .{
+        .max_leaf = eax,
+        .eax = eax,
+        .ebx = ebx,
+        .ecx = ecx,
+        .edx = edx,
+    };
+}
+
 /// Aligns an offset forward to the next multiple of alignment
 pub fn alignForward(offset: usize, alignment: usize) usize {
     const rem = offset % alignment;

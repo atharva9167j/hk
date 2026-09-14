@@ -14,6 +14,11 @@ export enum StorageType {
   INT64 = 0x07,
   UINT8 = 0x08,
   BOOL = 0x09,
+  INT16 = 0x0A,
+  UINT16 = 0x0B,
+  UINT32 = 0x0C,
+  UINT64 = 0x0D,
+  F64 = 0x0E,
   DQ4 = 0x10,
   NF4 = 0x10,
   DQ8 = 0x11,
@@ -47,6 +52,11 @@ export enum StorageType {
   MXFP4 = 0x62,
   NVFP4 = 0x63,
 }
+
+export const DEFAULT_ALIGNMENT_BYTES = 128;
+export const UNIVERSAL_PAGE_ALIGNMENT_BYTES = 4096;
+export const APPLE_SILICON_ALIGNMENT_BYTES = 16384;
+export const DIRECT_DMA_ALIGNMENT_BYTES = 65536;
 
 export enum TileLayout {
   ROW_MAJOR = 0x00,
@@ -85,6 +95,8 @@ export const HeaderFlags = {
   TILE_ALIGNED: 1 << 4,
   FLEXIBLE_ALIGNMENT: 1 << 5,
   IS_SHARDED: 1 << 6,
+  RAW_WEIGHT_STORAGE: 1 << 7,
+  UNIVERSAL_PAGE_ALIGNED: 1 << 8,
 } as const;
 
 // 16 NF4 standard codebook values
@@ -372,7 +384,64 @@ export class HkModel {
       return output;
     }
 
+    if (entry.storageType === StorageType.BF16) {
+      const u16 = new Uint16Array(this.buffer, entry.dataOffset, totalElements);
+      const u32 = new Uint32Array(1);
+      const f32 = new Float32Array(u32.buffer);
+      for (let i = 0; i < totalElements; i++) {
+        u32[0] = u16[i] << 16;
+        output[i] = f32[0];
+      }
+      return output;
+    }
+
+    if (entry.storageType === StorageType.INT8) {
+      const src = new Int8Array(this.buffer, entry.dataOffset, totalElements);
+      for (let i = 0; i < totalElements; i++) output[i] = src[i];
+      return output;
+    }
+
+    if (entry.storageType === StorageType.UINT8) {
+      const src = new Uint8Array(this.buffer, entry.dataOffset, totalElements);
+      for (let i = 0; i < totalElements; i++) output[i] = src[i];
+      return output;
+    }
+
+    if (entry.storageType === StorageType.INT16) {
+      const src = new Int16Array(this.buffer, entry.dataOffset, totalElements);
+      for (let i = 0; i < totalElements; i++) output[i] = src[i];
+      return output;
+    }
+
+    if (entry.storageType === StorageType.INT32) {
+      const src = new Int32Array(this.buffer, entry.dataOffset, totalElements);
+      for (let i = 0; i < totalElements; i++) output[i] = src[i];
+      return output;
+    }
+
+    if (entry.storageType === StorageType.F64) {
+      const src = new Float64Array(this.buffer, entry.dataOffset, totalElements);
+      for (let i = 0; i < totalElements; i++) output[i] = Number(src[i]);
+      return output;
+    }
+
     return output;
+  }
+
+  public isRawWeightStorage(): boolean {
+    return (this.flags & HeaderFlags.RAW_WEIGHT_STORAGE) !== 0;
+  }
+
+  public isUniversalPageAligned(): boolean {
+    return (this.flags & HeaderFlags.UNIVERSAL_PAGE_ALIGNED) !== 0;
+  }
+
+  public isTensorCoreAligned(): boolean {
+    return (this.alignment % 128) === 0;
+  }
+
+  public getRawTensorBytes(entry: TensorEntry): Uint8Array {
+    return new Uint8Array(this.buffer, entry.dataOffset, entry.dataSize);
   }
 
   /**
@@ -479,6 +548,7 @@ export class HkWriter {
   private splitIndex: number = 0;
   private splitCount: number = 1;
   private isSharded: boolean = false;
+  private rawWeightStorage: boolean = false;
   private metadata: Array<{ key: string; type: number; val: any }> = [];
   private tensors: Array<{
     name: string;
@@ -492,6 +562,14 @@ export class HkWriter {
 
   constructor(alignment = 128) {
     this.alignment = alignment;
+  }
+
+  public setAlignment(alignment: number): void {
+    this.alignment = alignment;
+  }
+
+  public setRawWeightStorage(enabled: boolean): void {
+    this.rawWeightStorage = enabled;
   }
 
   public setSharding(splitIndex: number, splitCount: number): void {
@@ -623,7 +701,16 @@ export class HkWriter {
     outBuf[3] = 0x54; // 'T'
     view.setUint16(4, 1, true); // Version Major
     view.setUint16(6, 0, true); // Version Minor
-    let flags = HeaderFlags.LITTLE_ENDIAN | HeaderFlags.TILE_ALIGNED;
+    let flags = HeaderFlags.LITTLE_ENDIAN;
+    if ((this.alignment % 128) === 0) {
+      flags |= HeaderFlags.TILE_ALIGNED;
+    }
+    if ((this.alignment % 4096) === 0) {
+      flags |= HeaderFlags.UNIVERSAL_PAGE_ALIGNED;
+    }
+    if (this.rawWeightStorage) {
+      flags |= HeaderFlags.RAW_WEIGHT_STORAGE;
+    }
     if (this.isSharded) {
       flags |= HeaderFlags.IS_SHARDED;
     }
