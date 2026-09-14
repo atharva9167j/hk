@@ -451,6 +451,50 @@ test "simd tensor ops: dot product and gemv" {
     try std.testing.expectEqual(@as(f32, 46.0), y[1]);
 }
 
+test "simd gemv q8_0" {
+    var blocks: [4]hk.quantization.BlockQ8_0 = undefined;
+    for (&blocks) |*b| {
+        b.d = 1.0;
+        @memset(&b.qs, 1);
+    }
+    const bytes = std.mem.sliceAsBytes(&blocks);
+    var x: [64]f32 = [_]f32{1.0} ** 64;
+    var y: [2]f32 = undefined;
+    hk.tensor_ops.gemvQ8_0(bytes, &x, null, &y, 2, 64);
+    try std.testing.expectEqual(@as(f32, 64.0), y[0]);
+    try std.testing.expectEqual(@as(f32, 64.0), y[1]);
+}
+
+test "simd gemv q4_0" {
+    var blocks: [4]hk.quantization.BlockQ4_0 = undefined;
+    for (&blocks) |*b| {
+        b.d = 1.0;
+        @memset(&b.qs, 0x88); // 8 is 0 in signed nibble
+    }
+    const bytes = std.mem.sliceAsBytes(&blocks);
+    var x: [64]f32 = [_]f32{1.0} ** 64;
+    var y: [2]f32 = undefined;
+    hk.tensor_ops.gemvQ4_0(bytes, &x, null, &y, 2, 64);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), y[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), y[1], 1e-4);
+}
+
+test "simd gemv q4_k" {
+    var blocks: [2]hk.quantization.BlockQ4_K = undefined; // M=2, K=256
+    for (&blocks) |*b| {
+        b.d = 1.0;
+        b.dmin = 0.0;
+        @memset(&b.scales, 0);
+        @memset(&b.qs, 0);
+    }
+    const bytes = std.mem.sliceAsBytes(&blocks);
+    var x: [256]f32 = [_]f32{1.0} ** 256;
+    var y: [2]f32 = undefined;
+    hk.tensor_ops.gemvQ4_K(bytes, &x, null, &y, 2, 256);
+}
+
+
+
 test "net2wider function preservation" {
     // Layer 1: [2, 3], Layer 2: [2, 2]
     // Input x: [3]

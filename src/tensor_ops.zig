@@ -750,53 +750,31 @@ pub fn layerNormOffsetF32(data: []f32, offset: f32) void {
     }
 }
 
-pub fn gemvQ8_0Row(row_blocks: []const quantization.BlockQ8_0, x: []const f32) f32 {
-    var acc0: Vec8f = @splat(0.0);
-    var acc1: Vec8f = @splat(0.0);
-
-    for (row_blocks, 0..) |blk, b_idx| {
-        const d: f32 = @floatCast(blk.d);
-        const vd: Vec8f = @splat(d);
-        const x_sub = x[b_idx * 32 .. (b_idx + 1) * 32];
-
-        const q0: Vec8f = @floatFromInt(@as(@Vector(8, i8), blk.qs[0..8].*));
-        const q1: Vec8f = @floatFromInt(@as(@Vector(8, i8), blk.qs[8..16].*));
-        const q2: Vec8f = @floatFromInt(@as(@Vector(8, i8), blk.qs[16..24].*));
-        const q3: Vec8f = @floatFromInt(@as(@Vector(8, i8), blk.qs[24..32].*));
-
-        const x0: Vec8f = x_sub[0..8].*;
-        const x1: Vec8f = x_sub[8..16].*;
-        const x2: Vec8f = x_sub[16..24].*;
-        const x3: Vec8f = x_sub[24..32].*;
-
-        acc0 += (q0 * x0 + q1 * x1) * vd;
-        acc1 += (q2 * x2 + q3 * x3) * vd;
+pub fn gemvQ8_0RowBytes(W_row_bytes: []const u8, x: []const f32, blocks_per_row: usize) f32 {
+    var total_sum: f32 = 0.0;
+    for (0..blocks_per_row) |b| {
+        const blk_offset = b * 34;
+        const d_raw = std.mem.readInt(u16, W_row_bytes[blk_offset..][0..2], .little);
+        const d: f32 = @floatCast(@as(f16, @bitCast(d_raw)));
+        const qs_bytes = W_row_bytes[blk_offset + 2 .. blk_offset + 34];
+        const x_sub = x[b * 32 .. (b + 1) * 32];
+        var block_sum: f32 = 0.0;
+        for (0..32) |i| {
+            const q: i8 = @bitCast(qs_bytes[i]);
+            block_sum += @as(f32, @floatFromInt(q)) * x_sub[i];
+        }
+        total_sum += block_sum * d;
     }
-    return @reduce(.Add, acc0 + acc1);
+    return total_sum;
 }
 
-const GemvQ8Ctx = struct {
-    blocks: [*]const quantization.BlockQ8_0,
-    blocks_per_row: usize,
-    x: []const f32,
-    bias: ?[]const f32,
-    y: []f32,
-};
-
-fn gemvQ8Task(ctx_ptr: *anyopaque, start_r: usize, end_r: usize) void {
-    const ctx: *const GemvQ8Ctx = @ptrCast(@alignCast(ctx_ptr));
-    for (start_r..end_r) |r| {
-        const row_blocks = ctx.blocks[r * ctx.blocks_per_row .. (r + 1) * ctx.blocks_per_row];
-        var row_sum = gemvQ8_0Row(row_blocks, ctx.x);
-        if (ctx.bias) |b| {
-            if (r < b.len) row_sum += b[r];
-        }
-        ctx.y[r] = row_sum;
-    }
+pub fn gemvQ8_0Row(row_blocks: []const quantization.BlockQ8_0, x: []const f32) f32 {
+    const bytes = std.mem.sliceAsBytes(row_blocks);
+    return gemvQ8_0RowBytes(bytes, x, row_blocks.len);
 }
 
 /// Matrix-Vector Multiplication for Q8_0 quantized matrix: y = W_q8_0 * x + bias
-/// W_bytes contains M * (K / 32) * @sizeOf(BlockQ8_0) bytes.
+/// W_bytes contains M * (K / 32) * 34 bytes.
 /// x is length K, y is length M.
 pub fn gemvQ8_0(
     W_bytes: []const u8,
@@ -807,72 +785,44 @@ pub fn gemvQ8_0(
     K: usize,
 ) void {
     const blocks_per_row = K / 32;
-    const blocks: [*]const quantization.BlockQ8_0 = @ptrCast(@alignCast(W_bytes.ptr));
-    const pool = AtomicPool.get();
-    var ctx = GemvQ8Ctx{
-        .blocks = blocks,
-        .blocks_per_row = blocks_per_row,
-        .x = x,
-        .bias = bias,
-        .y = y,
-    };
-    pool.parallelFor(M, @ptrCast(&ctx), gemvQ8Task);
+    const row_bytes_len = blocks_per_row * 34;
+    for (0..M) |r| {
+        const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
+        var row_sum = gemvQ8_0RowBytes(row_bytes, x, blocks_per_row);
+        if (bias) |b| {
+            if (r < b.len) row_sum += b[r];
+        }
+        y[r] = row_sum;
+    }
+}
+
+pub fn gemvQ4_0RowBytes(W_row_bytes: []const u8, x: []const f32, blocks_per_row: usize) f32 {
+    var total_sum: f32 = 0.0;
+    for (0..blocks_per_row) |b| {
+        const blk_offset = b * 18;
+        const d_raw = std.mem.readInt(u16, W_row_bytes[blk_offset..][0..2], .little);
+        const d: f32 = @floatCast(@as(f16, @bitCast(d_raw)));
+        const qs_bytes = W_row_bytes[blk_offset + 2 .. blk_offset + 18];
+        const x_sub = x[b * 32 .. (b + 1) * 32];
+        var block_sum: f32 = 0.0;
+        for (0..16) |i| {
+            const byte = qs_bytes[i];
+            const q0: i8 = @as(i8, @intCast(byte & 0x0F)) - 8;
+            const q1: i8 = @as(i8, @intCast((byte >> 4) & 0x0F)) - 8;
+            block_sum += @as(f32, @floatFromInt(q0)) * x_sub[i] + @as(f32, @floatFromInt(q1)) * x_sub[i + 16];
+        }
+        total_sum += block_sum * d;
+    }
+    return total_sum;
 }
 
 pub fn gemvQ4_0Row(row_blocks: []const quantization.BlockQ4_0, x: []const f32) f32 {
-    var acc0: Vec8f = @splat(0.0);
-    var acc1: Vec8f = @splat(0.0);
-
-    const mask_0f: @Vector(8, u8) = @splat(0x0F);
-    const offset_8: @Vector(8, i8) = @splat(8);
-    const shift_4: @Vector(8, u8) = @splat(4);
-
-    for (row_blocks, 0..) |blk, b_idx| {
-        const d: f32 = @floatCast(blk.d);
-        const vd: Vec8f = @splat(d);
-        const x_sub = x[b_idx * 32 .. (b_idx + 1) * 32];
-
-        const b0: @Vector(8, u8) = blk.qs[0..8].*;
-        const b1: @Vector(8, u8) = blk.qs[8..16].*;
-
-        const q0: Vec8f = @floatFromInt(@as(@Vector(8, i8), @bitCast(b0 & mask_0f)) - offset_8);
-        const q1: Vec8f = @floatFromInt(@as(@Vector(8, i8), @bitCast(b1 & mask_0f)) - offset_8);
-        const q2: Vec8f = @floatFromInt(@as(@Vector(8, i8), @bitCast((b0 >> shift_4) & mask_0f)) - offset_8);
-        const q3: Vec8f = @floatFromInt(@as(@Vector(8, i8), @bitCast((b1 >> shift_4) & mask_0f)) - offset_8);
-
-        const x0: Vec8f = x_sub[0..8].*;
-        const x1: Vec8f = x_sub[8..16].*;
-        const x2: Vec8f = x_sub[16..24].*;
-        const x3: Vec8f = x_sub[24..32].*;
-
-        acc0 += (q0 * x0 + q1 * x1) * vd;
-        acc1 += (q2 * x2 + q3 * x3) * vd;
-    }
-    return @reduce(.Add, acc0 + acc1);
-}
-
-const GemvQ4Ctx = struct {
-    blocks: [*]const quantization.BlockQ4_0,
-    blocks_per_row: usize,
-    x: []const f32,
-    bias: ?[]const f32,
-    y: []f32,
-};
-
-fn gemvQ4Task(ctx_ptr: *anyopaque, start_r: usize, end_r: usize) void {
-    const ctx: *const GemvQ4Ctx = @ptrCast(@alignCast(ctx_ptr));
-    for (start_r..end_r) |r| {
-        const row_blocks = ctx.blocks[r * ctx.blocks_per_row .. (r + 1) * ctx.blocks_per_row];
-        var row_sum = gemvQ4_0Row(row_blocks, ctx.x);
-        if (ctx.bias) |b| {
-            if (r < b.len) row_sum += b[r];
-        }
-        ctx.y[r] = row_sum;
-    }
+    const bytes = std.mem.sliceAsBytes(row_blocks);
+    return gemvQ4_0RowBytes(bytes, x, row_blocks.len);
 }
 
 /// Matrix-Vector Multiplication for Q4_0 quantized matrix: y = W_q4_0 * x + bias
-/// W_bytes contains M * (K / 32) * @sizeOf(BlockQ4_0) bytes.
+/// W_bytes contains M * (K / 32) * 18 bytes.
 pub fn gemvQ4_0(
     W_bytes: []const u8,
     x: []const f32,
@@ -882,43 +832,14 @@ pub fn gemvQ4_0(
     K: usize,
 ) void {
     const blocks_per_row = K / 32;
-    const blocks: [*]const quantization.BlockQ4_0 = @ptrCast(@alignCast(W_bytes.ptr));
-    const pool = AtomicPool.get();
-    var ctx = GemvQ4Ctx{
-        .blocks = blocks,
-        .blocks_per_row = blocks_per_row,
-        .x = x,
-        .bias = bias,
-        .y = y,
-    };
-    pool.parallelFor(M, @ptrCast(&ctx), gemvQ4Task);
-}
-
-const GemvQ4KCtx = struct {
-    blocks: [*]const quantization.BlockQ4_K,
-    superblocks_per_row: usize,
-    x: []const f32,
-    bias: ?[]const f32,
-    y: []f32,
-};
-
-fn gemvQ4KTask(ctx_ptr: *anyopaque, start_r: usize, end_r: usize) void {
-    const ctx: *const GemvQ4KCtx = @ptrCast(@alignCast(ctx_ptr));
-    var deq_buf: [256]f32 = undefined;
-    for (start_r..end_r) |r| {
-        var row_sum: f32 = 0.0;
-        const row_blocks = ctx.blocks[r * ctx.superblocks_per_row .. (r + 1) * ctx.superblocks_per_row];
-
-        for (row_blocks, 0..) |blk, sb_idx| {
-            quantization.dequantizeSuperBlockQ4_K(&blk, 256, &deq_buf);
-            const x_sub = ctx.x[sb_idx * 256 .. (sb_idx + 1) * 256];
-            row_sum += dotProductF32(&deq_buf, x_sub);
-        }
-
-        if (ctx.bias) |b| {
+    const row_bytes_len = blocks_per_row * 18;
+    for (0..M) |r| {
+        const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
+        var row_sum = gemvQ4_0RowBytes(row_bytes, x, blocks_per_row);
+        if (bias) |b| {
             if (r < b.len) row_sum += b[r];
         }
-        ctx.y[r] = row_sum;
+        y[r] = row_sum;
     }
 }
 
@@ -932,15 +853,26 @@ pub fn gemvQ4_K(
     K: usize,
 ) void {
     const superblocks_per_row = K / 256;
-    const blocks: [*]const quantization.BlockQ4_K = @ptrCast(@alignCast(W_bytes.ptr));
-    const pool = AtomicPool.get();
-    var ctx = GemvQ4KCtx{
-        .blocks = blocks,
-        .superblocks_per_row = superblocks_per_row,
-        .x = x,
-        .bias = bias,
-        .y = y,
-    };
-    pool.parallelFor(M, @ptrCast(&ctx), gemvQ4KTask);
+    const row_bytes_len = superblocks_per_row * 144;
+    var deq_buf: [256]f32 = undefined;
+    var blk: quantization.BlockQ4_K = undefined;
+    const blk_slice = std.mem.asBytes(&blk);
+
+    for (0..M) |r| {
+        var row_sum: f32 = 0.0;
+        const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
+        for (0..superblocks_per_row) |sb_idx| {
+            const sb_offset = sb_idx * 144;
+            @memcpy(blk_slice, row_bytes[sb_offset .. sb_offset + 144]);
+            quantization.dequantizeSuperBlockQ4_K(&blk, 256, &deq_buf);
+            const x_sub = x[sb_idx * 256 .. (sb_idx + 1) * 256];
+            row_sum += dotProductF32(&deq_buf, x_sub);
+        }
+        if (bias) |b| {
+            if (r < b.len) row_sum += b[r];
+        }
+        y[r] = row_sum;
+    }
 }
+
 

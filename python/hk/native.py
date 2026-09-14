@@ -1926,15 +1926,17 @@ def native_gemv_q8_0(W_bytes: bytes, x: np.ndarray, bias: Optional[np.ndarray], 
     """Fast packed-weight GEMV for Q8_0 quantized weights without full FP32 decompression."""
     x_c = np.ascontiguousarray(x, dtype=np.float32)
     out = np.empty(M, dtype=np.float32)
-    bias_ptr = bias.ctypes.data_as(ctypes.POINTER(ctypes.c_float)) if bias is not None else None
+    bias_c = np.ascontiguousarray(bias, dtype=np.float32) if bias is not None else None
+    bias_ptr = bias_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)) if bias_c is not None else None
     if is_native_available() and _LIB is not None and hasattr(_LIB, "hk_gemv_q8_0"):
+        w_raw = bytes(W_bytes)
         _LIB.hk_gemv_q8_0(
-            W_bytes,
+            w_raw,
             x_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             bias_ptr,
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            M,
-            K,
+            ctypes.c_uint64(M),
+            ctypes.c_uint64(K),
         )
         return out
     raise RuntimeError("Native Zig GEMV kernel required for Q8_0")
@@ -1944,15 +1946,17 @@ def native_gemv_q4_0(W_bytes: bytes, x: np.ndarray, bias: Optional[np.ndarray], 
     """Fast packed-weight GEMV for Q4_0 quantized weights without full FP32 decompression."""
     x_c = np.ascontiguousarray(x, dtype=np.float32)
     out = np.empty(M, dtype=np.float32)
-    bias_ptr = bias.ctypes.data_as(ctypes.POINTER(ctypes.c_float)) if bias is not None else None
+    bias_c = np.ascontiguousarray(bias, dtype=np.float32) if bias is not None else None
+    bias_ptr = bias_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)) if bias_c is not None else None
     if is_native_available() and _LIB is not None and hasattr(_LIB, "hk_gemv_q4_0"):
+        w_raw = bytes(W_bytes)
         _LIB.hk_gemv_q4_0(
-            W_bytes,
+            w_raw,
             x_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             bias_ptr,
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            M,
-            K,
+            ctypes.c_uint64(M),
+            ctypes.c_uint64(K),
         )
         return out
     raise RuntimeError("Native Zig GEMV kernel required for Q4_0")
@@ -1962,15 +1966,17 @@ def native_gemv_q4_k(W_bytes: bytes, x: np.ndarray, bias: Optional[np.ndarray], 
     """Fast packed-weight GEMV for Q4_K quantized weights without full FP32 decompression."""
     x_c = np.ascontiguousarray(x, dtype=np.float32)
     out = np.empty(M, dtype=np.float32)
-    bias_ptr = bias.ctypes.data_as(ctypes.POINTER(ctypes.c_float)) if bias is not None else None
+    bias_c = np.ascontiguousarray(bias, dtype=np.float32) if bias is not None else None
+    bias_ptr = bias_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)) if bias_c is not None else None
     if is_native_available() and _LIB is not None and hasattr(_LIB, "hk_gemv_q4_k"):
+        w_raw = bytes(W_bytes)
         _LIB.hk_gemv_q4_k(
-            W_bytes,
+            w_raw,
             x_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             bias_ptr,
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-            M,
-            K,
+            ctypes.c_uint64(M),
+            ctypes.c_uint64(K),
         )
         return out
     raise RuntimeError("Native Zig GEMV kernel required for Q4_K")
