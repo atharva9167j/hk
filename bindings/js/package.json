@@ -1,5 +1,5 @@
 {
-  "name": "hknt",
+  "name": "@harshitkhandelwal208/hk",
   "version": "1.0.0",
   "description": "TypeScript / JavaScript bindings for the HK neural tensor format and SIMD compute engine.",
   "type": "module",
