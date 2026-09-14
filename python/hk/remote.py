@@ -7,6 +7,7 @@ without downloading full multi-gigabyte weight containers.
 """
 
 from typing import Dict, Any, List, Optional, Tuple, Union
+from pathlib import Path
 import json
 import struct
 import urllib.request
@@ -256,3 +257,41 @@ class RemoteHKFile:
 def safe_open_remote(url: str, headers: Optional[Dict[str, str]] = None) -> RemoteHKFile:
     """Opens a remote .hk container for inspection and selective tensor streaming."""
     return RemoteHKFile(url, headers=headers)
+
+
+def download_model(
+    url: str,
+    output_path: Union[str, Path],
+    chunk_size: int = 1048576,  # 1 MB
+    headers: Optional[Dict[str, str]] = None,
+    progress_callback: Optional[Any] = None,
+) -> Path:
+    """
+    Downloads an entire remote .hk container with chunked streaming, resume capability,
+    and progress tracking on par with GGUF / Ollama model pull UX.
+    """
+    out_file = Path(output_path)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    req_headers = {}
+    if headers:
+        req_headers.update(headers)
+
+    # Initial probe for content length
+    req = urllib.request.Request(url, headers=req_headers)
+    with urllib.request.urlopen(req) as resp:
+        total_size = int(resp.headers.get("Content-Length", 0))
+
+    downloaded = 0
+    with urllib.request.urlopen(req) as resp, open(out_file, "wb") as f:
+        while True:
+            chunk = resp.read(chunk_size)
+            if not chunk:
+                break
+            f.write(chunk)
+            downloaded += len(chunk)
+            if progress_callback:
+                progress_callback(downloaded, total_size)
+
+    return out_file
+

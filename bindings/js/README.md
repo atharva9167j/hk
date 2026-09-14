@@ -7,9 +7,10 @@ Provides fast container reading, memory-mapped tensor access, GGUF/Safetensors c
 
 ## Features
 
+- **Non-Quantized Storage Efficiency**: Direct memory-mapped zero-copy access to FP32, FP16, BF16, and FP8 unquantized tensors with zero deserialization overhead.
 - **Zero-Dependency**: Reads `.hk` containers directly in browser, Web Worker, or Node.js without native binary dependencies.
-- **Complete Quantization Support**: Reads FP32, FP16, BF16, INT8, Q4_0, Q8_0, Q4_K, Q5_K, Q6_K, and IQ codebooks.
-- **Fast Metadata & Header Access**: Instant table-of-contents inspection and key-value metadata retrieval.
+- **Minimal Container Overhead**: Fixed 128-byte header and binary TOC inspection in sub-milliseconds.
+- **Comprehensive Quantization Support**: Full support for quantized models (Q4_0, Q8_0, K-quants, I-quants) for edge and mobile execution.
 - **Typed & Pure**: Full TypeScript typings (`.d.ts`), tree-shakeable, and ESM/CJS compatible.
 
 ---

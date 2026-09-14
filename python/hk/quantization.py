@@ -36,6 +36,7 @@ from .native import (
     native_quantize_tensor_q5_k, native_dequantize_tensor_q5_k,
     native_quantize_tensor_q3_k, native_dequantize_tensor_q3_k,
     native_quantize_tensor_q2_k, native_dequantize_tensor_q2_k,
+    native_quantize_tensor_nf4, native_dequantize_tensor_nf4,
 )
 
 # 16-point NormalFloat-4 (NF4) quantile lookup table matching Zig implementation
@@ -108,30 +109,32 @@ def quantize_nf4_dual_mode(
     block_size: int = 32,
     compute_residual: bool = True,
 ) -> Tuple[bytes, bytes, Optional[bytes]]:
-    """Quantizes a float tensor to NormalFloat-4 (NF4) with optional residual recovery buffer."""
-    flat = tensor.detach().cpu().to(torch.float32).numpy().flatten()
+    """Quantizes a float tensor to NormalFloat-4 (NF4) with optional residual recovery buffer via native Zig."""
+    flat = tensor.detach().cpu().to(torch.float32).contiguous().numpy().ravel()
     n = flat.size
     pad_len = (block_size - (n % block_size)) % block_size
     if pad_len > 0:
         flat = np.pad(flat, (0, pad_len))
-    num_blocks = flat.size // block_size
 
+    if is_native_available():
+        try:
+            return native_quantize_tensor_nf4(flat, block_size=block_size, compute_residual=compute_residual)
+        except Exception:
+            pass
+
+    num_blocks = flat.size // block_size
     blocks = flat.reshape(num_blocks, block_size)
     scales = np.max(np.abs(blocks), axis=1)
     scales = np.where(scales == 0.0, 1e-8, scales).astype(np.float32)
 
     norm_blocks = np.clip(blocks / scales[:, None], -1.0, 1.0)
-    # Map to closest NF4 code (0..15)
-    # Broadcast norm_blocks against NF4_TABLE: shape (num_blocks, block_size, 16)
     diffs = np.abs(norm_blocks[:, :, None] - NF4_TABLE[None, None, :])
-    codes = np.argmin(diffs, axis=2).astype(np.uint8) # shape (num_blocks, block_size)
+    codes = np.argmin(diffs, axis=2).astype(np.uint8)
 
-    # Pack 2 4-bit codes per byte
     codes_flat = codes.flatten()
     low = codes_flat[0::2] & 0x0F
     high = (codes_flat[1::2] & 0x0F) << 4
     packed = (low | high).astype(np.uint8).tobytes()
-
     scales_bytes = scales.tobytes()
 
     residual_bytes = None
@@ -152,14 +155,29 @@ def dequantize_nf4_dual_mode(
     block_size: int = 32,
     residual: Optional[bytes] = None,
 ) -> torch.Tensor:
-    """Dequantizes NF4 packed buffer back into PyTorch float tensor with optional residual addition."""
+    """Dequantizes NF4 packed buffer back into PyTorch float tensor with optional residual addition via native Zig."""
     total_elements = 1
     for d in shape:
         total_elements *= d
     pad_len = (block_size - (total_elements % block_size)) % block_size
     n_padded = total_elements + pad_len
-    num_blocks = n_padded // block_size
 
+    if is_native_available():
+        try:
+            out_arr = native_dequantize_tensor_nf4(
+                packed_data,
+                scales_data,
+                n_padded,
+                block_size=block_size,
+                residual_bytes=residual,
+            )
+            if pad_len > 0:
+                out_arr = out_arr[:total_elements]
+            return torch.from_numpy(out_arr).view(*shape)
+        except Exception:
+            pass
+
+    num_blocks = n_padded // block_size
     scales = np.frombuffer(scales_data, dtype=np.float32)
     packed = np.frombuffer(packed_data, dtype=np.uint8)
 

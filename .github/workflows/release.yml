@@ -16,6 +16,16 @@ on:
         required: true
         type: boolean
         default: true
+      publish_crates:
+        description: 'Publish to Crates.io'
+        required: true
+        type: boolean
+        default: true
+      publish_nuget:
+        description: 'Publish to NuGet'
+        required: true
+        type: boolean
+        default: true
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
@@ -53,10 +63,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}
-          path: zig-out/lib/*
+          path: |
+            zig-out/lib/*
+            zig-out/bin/*.dll
 
   build-python-wheel:
-    name: Build Python Wheels & Sdist
+    name: Build Multiplatform Python Wheels & Sdist
+    needs: [build-native-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +83,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install build wheel
+
+      - name: Download All Native Binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: python/hk/
+
+      - name: List Bundled Native Binaries
+        run: ls -la python/hk/
 
       - name: Build Source Distribution and Wheel
         run: python -m build
@@ -126,7 +149,7 @@ jobs:
 
   publish-npm:
     name: Publish to NPM
-    needs: [create-github-release]
+    needs: [build-native-binaries, create-github-release]
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
     steps:
@@ -137,6 +160,13 @@ jobs:
         with:
           node-version: '20.x'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Download Native Binaries for NPM
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: bindings/js/lib/
 
       - name: Install Dependencies & Build TypeScript
         run: |
@@ -150,3 +180,34 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-crates:
+    name: Publish to Crates.io (Rust)
+    needs: [build-native-binaries, create-github-release]
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_crates)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to Crates.io
+        run: |
+          cd bindings/rust
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+  publish-nuget:
+    name: Publish to NuGet (C#)
+    needs: [build-native-binaries, create-github-release]
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_nuget)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build & Pack NuGet Package
+        run: |
+          cd bindings/csharp
+          dotnet pack -c Release
+          dotnet nuget push bin/Release/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        continue-on-error: true

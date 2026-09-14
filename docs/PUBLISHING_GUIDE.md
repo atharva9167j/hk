@@ -1,183 +1,116 @@
-# HK Package Publishing & GitHub Synchronization Guide
+# HK Package Publishing & Distribution Guide
 
-This guide explains how to publish and synchronize the **HK Neural Tensor Framework** packages across **GitHub**, **PyPI (Python / `pip`)**, and **npm (TypeScript / JavaScript)**.
+This guide details how to publish and synchronize all **HK Neural Tensor Framework** packages across global registries, following the convention: **`hk` wherever possible, `hknt` elsewhere**:
 
----
-
-## 1. Architecture of HK Packages
-
-The repository is organized to distribute packages across language ecosystems from a single source of truth:
-
-| Package | Ecosystem | Source Directory | Configuration File | Target Registry |
-| :--- | :--- | :--- | :--- | :--- |
-| **`hk`** (or `hk-tensor`) | Python / PyTorch | Repository root | [`pyproject.toml`](../pyproject.toml) | [PyPI](https://pypi.org) |
-| **`@hk-format/core`** (or `@harshitkhandelwal208/hk`) | Node.js / Browser | [`bindings/js/`](../bindings/js) | [`bindings/js/package.json`](../bindings/js/package.json) | [npm](https://npmjs.com) |
-| **Native Binaries** (`.dll`, `.so`, `.dylib`) | C/C++/Zig | [`src/`](../src) | [`build.zig`](../build.zig) | [GitHub Releases](https://github.com/harshitkhandelwal208/hk/releases) |
+| Package Name | Ecosystem | Registry | Configuration | Package Type |
+|:---|:---|:---|:---|:---|
+| **`hk`** | Python / PyTorch | **[PyPI](https://pypi.org/project/hk/)** | [`pyproject.toml`](../pyproject.toml) | Wheel (`.whl`) & Sdist (`.tar.gz`) |
+| **`hknt`** | TypeScript / JS | **[npm](https://www.npmjs.com/package/hknt)** | [`bindings/js/package.json`](../bindings/js/package.json) | npm Tarball (`.tgz`) |
+| **`hknt`** | Rust | **[crates.io](https://crates.io/crates/hknt)** | [`bindings/rust/Cargo.toml`](../bindings/rust/Cargo.toml) | Cargo Crate (`.crate`) |
+| **`Hk`** | C# / .NET | **[NuGet](https://www.nuget.org/packages/Hk)** | [`bindings/csharp/Hk.csproj`](../bindings/csharp/Hk.csproj) | NuGet Package (`.nupkg`) |
+| **`hk/bindings/go`** | Go | **GitHub / pkg.go.dev** | [`bindings/go/go.mod`](../bindings/go/go.mod) | Go Module |
+| **Native Binaries** | C / C++ / CLI | **[GitHub Releases](https://github.com/harshitkhandelwal208/hk/releases)** | [`build.zig`](../build.zig) | `.exe`, `.dll`, `.so`, `.dylib` |
 
 ---
 
-## 2. Synchronized GitHub Actions Release (Automated)
+## 1. Automated Release via GitHub Actions
 
-The repository includes a unified workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml).  
-Whenever you push a version tag (e.g. `v1.0.0`), GitHub Actions will:
-1. Compile native Zig shared libraries across 4 targets (`x86_64-linux`, `aarch64-linux`, `x86_64-windows`, `aarch64-macos`).
-2. Build Python wheels and source distribution (`dist/*.whl`, `dist/*.tar.gz`).
-3. Create a GitHub Release and attach all native binary assets.
-4. Publish the Python wheel to **PyPI** (`pip install hk`).
-5. Compile TypeScript and publish to **npm** (`npm install @hk-format/core`).
+The repository includes a release pipeline in [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
-### One-Time Setup on GitHub
+### Step 1: Set Repository Secrets (One-time)
+In your GitHub repo settings (`Settings` > `Secrets and variables` > `Actions`):
+- `PYPI_API_TOKEN`: PyPI token with upload permissions (or configure PyPI Trusted Publishing / OIDC).
+- `NPM_TOKEN`: npm granular access token with Read and Write permissions for `hknt`.
+- `CARGO_REGISTRY_TOKEN`: crates.io API token with publish permissions for `hknt`.
+- `NUGET_API_KEY`: nuget.org API key with push permissions for `Hk`.
 
-To enable automated publishing, configure the following secrets and settings in your GitHub repository:
+### Step 2: Trigger the Release
+Push a git version tag:
+```bash
+git tag -a v1.0.0 -m "Release v1.0.0: HK Neural Tensor Framework"
+git push origin v1.0.0
+```
 
-#### Step A: NPM Setup
-1. Log in to [npmjs.com](https://www.npmjs.com).
-2. Go to **Access Tokens** > **Generate New Token** > choose **Granular Access Token** (or Classic Automation token).
-3. Set permissions to **Read and Write** for packages.
-4. On GitHub, navigate to:  
-   `https://github.com/harshitkhandelwal208/hk/settings/secrets/actions`
-5. Click **New repository secret**:
-   - Name: `NPM_TOKEN`
-   - Value: `<your-npm-token>`
-
-#### Step B: PyPI Setup (Trusted Publisher - Recommended)
-PyPI supports **Trusted Publishing (OIDC)**, which eliminates the need to store long-lived passwords or API tokens:
-1. Log in to [pypi.org](https://pypi.org).
-2. Go to **Account Settings** > **Publishing**.
-3. Under **Add a new publisher**:
-   - PyPI Project Name: `hk` (or `hk-tensor` if using that name)
-   - Owner: `harshitkhandelwal208`
-   - Repository: `hk`
-   - Workflow name: `release.yml`
-   - Environment name: (leave blank or enter `pypi`)
-4. *Alternative (API Token)*: If preferred, create an API token on PyPI and add it to GitHub secrets as `PYPI_API_TOKEN`.
+GitHub Actions will automatically:
+1. Cross-compile native Zig binaries (`x86_64-linux`, `aarch64-linux`, `x86_64-windows`, `aarch64-macos`).
+2. Build multiplatform Python wheels and sdist.
+3. Create a GitHub Release with all compiled assets attached.
+4. Publish `hk` to PyPI.
+5. Publish `hknt` to npm.
+6. Publish `hknt` to crates.io.
+7. Publish `Hk` to NuGet.
 
 ---
 
-## 3. How to Trigger a Synchronized Release
+## 2. Direct Local Publishing
 
-Whenever you are ready to publish a new version:
+All packages can also be published directly from your local terminal:
 
-1. **Update versions** in the repository:
-   - In `pyproject.toml`: update `version = "1.0.0"`
-   - In `bindings/js/package.json`: update `"version": "1.0.0"`
-   - In `python/hk/__init__.py`: update `__version__ = "1.0.0"`
-   - In `CHANGELOG.md`: document the release highlights
-
-2. **Commit and push to main**:
+### A. Python (`hk` on PyPI)
+1. Build the distribution:
    ```bash
-   git add .
-   git commit -m "chore: bump version to 1.0.0"
-   git push origin main
+   py -3.12 -m build
    ```
-
-3. **Tag the release and push the tag**:
+2. Verify package metadata:
    ```bash
-   git tag -a v1.0.0 -m "HK Framework v1.0.0 Release"
-   git push origin v1.0.0
+   py -3.12 -m twine check dist/*
    ```
-
-4. Watch the progress in the **Actions** tab:  
-   `https://github.com/harshitkhandelwal208/hk/actions`
+3. Upload to PyPI:
+   ```bash
+   py -3.12 -m twine upload dist/*
+   ```
 
 ---
 
-## 4. Manual / Local Publishing
-
-If you ever want to publish locally without waiting for GitHub Actions, follow these steps:
-
-### A. Publishing to PyPI (Python / `pip`)
-
-1. **Install build and upload tools**:
-   ```bash
-   pip install --upgrade build twine
-   ```
-
-2. **Build the source distribution and binary wheel**:
-   ```bash
-   # Run from the root of the repository
-   python -m build
-   ```
-   This produces files in `dist/`, e.g.:
-   - `dist/hk-1.0.0.tar.gz`
-   - `dist/hk-1.0.0-py3-none-any.whl`
-
-3. **Check package integrity**:
-   ```bash
-   python -m twine check dist/*
-   ```
-
-4. **Upload to PyPI**:
-   ```bash
-   # Test on TestPyPI first (optional):
-   python -m twine upload --repository testpypi dist/*
-
-   # Publish to production PyPI:
-   python -m twine upload dist/*
-   ```
-   *(Enter your PyPI `__token__` username and API token password when prompted).*
-
----
-
-### B. Publishing to npm (TypeScript / JavaScript)
-
-1. **Navigate to the JS binding directory**:
+### B. TypeScript / Node.js (`hknt` on npm)
+1. Build and package:
    ```bash
    cd bindings/js
-   ```
-
-2. **Install dependencies and compile TypeScript**:
-   ```bash
-   npm install
    npm run build
+   npm pack
    ```
-   This compiles `hk.ts` to `dist/hk.js` and `dist/hk.d.ts`.
-
-3. **Verify the package payload**:
-   ```bash
-   npm pack --dry-run
-   ```
-   Ensure only `dist/`, `README.md`, and `package.json` are included.
-
-4. **Log in to npm**:
+2. Authenticate and publish:
    ```bash
    npm login
-   ```
-
-5. **Publish to npm**:
-   ```bash
-   # For scoped packages (e.g. @hk-format/core or @harshitkhandelwal208/hk):
    npm publish --access public
-
-   # For unscoped packages (e.g. hk-tensor):
-   npm publish
    ```
 
 ---
 
-## 5. Package Naming Notes & Recommendations
-
-### PyPI (`pip`)
-- **`hk`**: Two-letter names on PyPI may be protected or require PyPI administrator review. If `hk` is reserved or blocked during upload, change `name = "hk-tensor"` or `name = "hk-format"` in `pyproject.toml`. Python imports remain `import hk` regardless of whether the pip package is named `hk` or `hk-tensor`.
-
-### npm
-- **`@harshitkhandelwal208/hk`**: Guaranteed free, namespaced under your GitHub/npm username, no name collisions possible.
-- **`@hk-format/core`**: Requires creating an organization named `hk-format` on npm (free for public packages).
-- **`hk-tensor`**: Unscoped, available for direct registration.
-
-To change the npm package name, edit the `"name"` field in [`bindings/js/package.json`](../bindings/js/package.json).
+### C. Rust (`hknt` on crates.io)
+1. Package the crate:
+   ```bash
+   cd bindings/rust
+   cargo package
+   ```
+2. Authenticate and publish:
+   ```bash
+   cargo login <your-crates-io-token>
+   cargo publish
+   ```
 
 ---
 
-## 6. Git Remote Configuration
+### D. C# / .NET (`Hk` on NuGet)
+1. Build and pack the `.nupkg`:
+   ```bash
+   cd bindings/csharp
+   dotnet pack -c Release
+   ```
+2. Push to NuGet:
+   ```bash
+   dotnet nuget push bin/Release/Hk.1.0.0.nupkg --api-key <your-nuget-key> --source https://api.nuget.org/v3/index.json
+   ```
 
-Both SSH and HTTPS are supported for this repository:
+---
 
-- **HTTPS with GitHub CLI** (Currently active):
-  ```bash
-  git remote set-url origin https://github.com/harshitkhandelwal208/hk.git
-  ```
-- **SSH** (Requires uploading your `~/.ssh/id_ed25519.pub` to GitHub Settings > SSH Keys):
-  ```bash
-  git remote set-url origin git@github.com:harshitkhandelwal208/hk.git
-  ```
+### E. Go Module
+Go modules are fetched directly from GitHub tags:
+```bash
+git tag bindings/go/v1.0.0
+git push origin bindings/go/v1.0.0
+```
+Consumers can then import:
+```go
+import "github.com/harshitkhandelwal208/hk/bindings/go/hk"
+```

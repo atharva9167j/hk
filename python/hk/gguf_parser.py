@@ -243,7 +243,13 @@ class GGUFReaderLight:
 
 
 def convert_gguf_to_hk(input_gguf: str, output_hk: str):
-    """Converts a GGUF file to HK container format with zero-copy bitstream transplant."""
+    """Converts a GGUF file to HK container format with zero-copy bitstream transplant in native Zig."""
+    from .native import is_native_available, native_convert_gguf
+    if is_native_available():
+        ret = native_convert_gguf(input_gguf, output_hk)
+        if ret == 0:
+            return
+        raise RuntimeError(f"Native GGUF conversion failed with error code: {ret}")
     reader = GGUFReaderLight(input_gguf)
     reader.convert_to_hk(output_hk)
 

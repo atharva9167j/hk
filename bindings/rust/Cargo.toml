@@ -1,5 +1,5 @@
 [package]
-name = "hk"
+name = "hknt"
 version = "1.0.0"
 edition = "2021"
 description = "Safe idiomatic Rust bindings for the HK neural tensor format and SIMD compute engine."

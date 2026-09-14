@@ -456,7 +456,17 @@ pub fn dequantizeSuperBlockQ4_K(block: *const BlockQ4_K, count: usize, out: []f3
     const dmin: f32 = @floatCast(block.dmin);
     const n = @min(count, QK_K);
 
-    for (0..n) |i| {
+    var i: usize = 0;
+    while (i + 16 <= n) : (i += 16) {
+        const byte_idx = i / 2;
+        const b = block.qs[byte_idx..][0..8];
+        inline for (0..8) |j| {
+            const raw = b[j];
+            out[i + 2 * j] = @as(f32, @floatFromInt(raw & 0x0F)) * d + dmin;
+            out[i + 2 * j + 1] = @as(f32, @floatFromInt(raw >> 4)) * d + dmin;
+        }
+    }
+    while (i < n) : (i += 1) {
         const byte_idx = i / 2;
         const code: u4 = if (i % 2 == 0)
             @truncate(block.qs[byte_idx] & 0x0F)

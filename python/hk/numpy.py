@@ -147,38 +147,12 @@ def load_file(
         tensors_torch = torch_load_file(path, device="cpu", with_residual=with_residual)
         return {k: v.detach().cpu().numpy() for k, v in tensors_torch.items()}
 
-    reader = NativeHKReader(str(path))
+    hk_file = HKFile(path, framework="np", with_residual=with_residual)
     arrays: Dict[str, np.ndarray] = {}
-    shared_tensors: List[Tuple[str, Any]] = []
-
     try:
-        for name, meta in reader.tensors.items():
-            stype = meta["storage_type"]
-            shape = meta["shape"]
-
-            if stype == STORAGE_SHARED_REF:
-                shared_tensors.append((name, meta))
-                continue
-
-            raw_bytes = reader.get_raw_data(name)
-            if stype in STORAGE_TO_NUMPY_DTYPE:
-                dtype = STORAGE_TO_NUMPY_DTYPE[stype]
-                arr = np.frombuffer(raw_bytes, dtype=dtype).reshape(shape).copy()
-            else:
-                arr = reader.dequantize(name, with_residual=with_residual)
-
-            arrays[name] = arr
-
-        for shared_name, shared_meta in shared_tensors:
-            matched = False
-            for primary_name, primary_arr in arrays.items():
-                if tuple(primary_arr.shape) == shared_meta["shape"]:
-                    arrays[shared_name] = primary_arr
-                    matched = True
-                    break
-            if not matched:
-                arrays[shared_name] = np.zeros(shared_meta["shape"], dtype=np.float32)
+        for name in hk_file.keys():
+            arrays[name] = hk_file.get_tensor(name)
     finally:
-        reader.close()
+        hk_file.close()
 
     return arrays

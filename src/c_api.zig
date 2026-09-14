@@ -13,6 +13,10 @@ const tokenizer_mod = @import("tokenizer.zig");
 const inference_mod = @import("inference.zig");
 const sampling_mod = @import("sampling.zig");
 const safetensors_mod = @import("safetensors.zig");
+const hf_mapper_mod = @import("hf_mapper.zig");
+const context_mod = @import("context.zig");
+const pipeline_mod = @import("pipeline.zig");
+const adaptive_mod = @import("adaptive.zig");
 
 pub const hk_reader_t = opaque {};
 
@@ -506,6 +510,54 @@ pub export fn hk_dequantize_tensor_q2_k(in_bytes: [*]const u8, count: u64, out_f
     const blocks: [*]const quantization.BlockQ2_K = @ptrCast(@alignCast(in_bytes));
     for (0..num_blocks) |b| {
         quantization.dequantizeSuperBlockQ2_K(&blocks[b], quantization.QK_K, out_f32[b * quantization.QK_K .. (b + 1) * quantization.QK_K]);
+    }
+    return 0;
+}
+
+pub export fn hk_quantize_tensor_nf4(
+    weights: [*]const f32,
+    count: u64,
+    block_size: u32,
+    packed_out: [*]u8,
+    scales_out: [*]f32,
+    residual_out: ?[*]f32,
+) c_int {
+    if (block_size == 0 or count % block_size != 0) return -1;
+    const num_blocks: usize = @intCast(count / block_size);
+    const bytes_per_block: usize = (block_size + 1) / 2;
+
+    for (0..num_blocks) |b| {
+        const in_b = weights[b * block_size .. (b + 1) * block_size];
+        const out_p = packed_out[b * bytes_per_block .. (b + 1) * bytes_per_block];
+        const res_p: ?[]f32 = if (residual_out) |r| r[b * block_size .. (b + 1) * block_size] else null;
+        scales_out[b] = quantization.quantizeBlockNF4(in_b, out_p, res_p);
+    }
+    return 0;
+}
+
+pub export fn hk_dequantize_tensor_nf4(
+    packed_in: [*]const u8,
+    scales_in: [*]const f32,
+    count: u64,
+    block_size: u32,
+    out_f32: [*]f32,
+    residual_in: ?[*]const f32,
+) c_int {
+    if (block_size == 0 or count % block_size != 0) return -1;
+    const num_blocks: usize = @intCast(count / block_size);
+    const bytes_per_block: usize = (block_size + 1) / 2;
+
+    for (0..num_blocks) |b| {
+        const in_p = packed_in[b * bytes_per_block .. (b + 1) * bytes_per_block];
+        const out_b = out_f32[b * block_size .. (b + 1) * block_size];
+        const scale = scales_in[b];
+        quantization.dequantizeBlockNF4(in_p, scale, block_size, out_b);
+        if (residual_in) |r| {
+            const res_b = r[b * block_size .. (b + 1) * block_size];
+            for (0..block_size) |i| {
+                out_b[i] += res_b[i];
+            }
+        }
     }
     return 0;
 }
@@ -1444,6 +1496,134 @@ pub export fn hk_convert_safetensors(
     safetensors_mod.transcodeSafeTensorsToHK(allocator, input_path, output_path, target_st) catch return -1;
     return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Native Hugging Face Architecture Mapper C ABI
+// ---------------------------------------------------------------------------
+pub export fn hk_hf_detect_architecture(
+    json_config_c: [*:0]const u8,
+    out_arch: [*]u8,
+    max_len: usize,
+) c_int {
+    const json_str = std.mem.sliceTo(json_config_c, 0);
+    const arch = hf_mapper_mod.detectArchitectureFromJson(json_str);
+    if (arch.len + 1 > max_len) return -1;
+    @memcpy(out_arch[0..arch.len], arch);
+    out_arch[arch.len] = 0;
+    return 0;
+}
+
+pub export fn hk_hf_map_tensor_name(
+    tensor_name_c: [*:0]const u8,
+    arch_c: [*:0]const u8,
+    to_hk: bool,
+    out_name: [*]u8,
+    max_len: usize,
+) c_int {
+    const tensor_name = std.mem.sliceTo(tensor_name_c, 0);
+    const arch = std.mem.sliceTo(arch_c, 0);
+    const out_slice = out_name[0..max_len];
+
+    const mapped = if (to_hk)
+        hf_mapper_mod.mapTensorNameToHk(tensor_name, arch, out_slice) catch return -1
+    else
+        hf_mapper_mod.mapTensorNameToHf(tensor_name, arch, out_slice) catch return -1;
+
+    if (mapped.len >= max_len) return -1;
+    out_name[mapped.len] = 0;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Native Context Window Management C ABI
+// ---------------------------------------------------------------------------
+pub export fn hk_context_truncate(
+    in_tokens: [*]const u32,
+    in_len: usize,
+    max_tokens: usize,
+    strategy: c_int,
+    head_ratio: f32,
+    out_tokens: [*]u32,
+    out_len: *usize,
+) c_int {
+    const tokens = in_tokens[0..in_len];
+    const strat = context_mod.TruncationStrategy.fromInt(strategy);
+    const out_buf = out_tokens[0..max_tokens];
+    const written = context_mod.truncateTokens(tokens, max_tokens, strat, head_ratio, out_buf);
+    out_len.* = written;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Native Adaptive Autonomous Framework C ABI
+// ---------------------------------------------------------------------------
+pub export fn hk_governor_can_grow(
+    current_params: u64,
+    added_params: u64,
+    max_growth_ratio: f32,
+    max_vram_mb: u64,
+    dtype_bytes: u32,
+    out_reason: ?[*]u8,
+    max_reason_len: usize,
+) c_int {
+    const gov = adaptive_mod.GrowthGovernor.init(max_vram_mb, max_growth_ratio);
+    if (out_reason) |reason_ptr| {
+        const reason_buf = reason_ptr[0..max_reason_len];
+        const res = gov.canGrow(current_params, added_params, dtype_bytes, reason_buf);
+        const len = @min(res.reason.len, max_reason_len - 1);
+        reason_ptr[len] = 0;
+        return if (res.approved) 1 else 0;
+    } else {
+        var dummy: [64]u8 = undefined;
+        const res = gov.canGrow(current_params, added_params, dtype_bytes, &dummy);
+        return if (res.approved) 1 else 0;
+    }
+}
+
+pub export fn hk_governor_can_grow_batch(
+    current_params: [*]const u64,
+    added_params: [*]const u64,
+    n: usize,
+    max_growth_ratio: f32,
+    max_vram_mb: u64,
+    dtype_bytes: u32,
+    out_results: [*]u8,
+) c_int {
+    const gov = adaptive_mod.GrowthGovernor.init(max_vram_mb, max_growth_ratio);
+    var dummy: [64]u8 = undefined;
+    for (0..n) |i| {
+        const res = gov.canGrow(current_params[i], added_params[i], dtype_bytes, &dummy);
+        out_results[i] = if (res.approved) 1 else 0;
+    }
+    return 0;
+}
+
+pub export fn hk_expand_vocab_embeddings(
+    old_embed: [*]const f32,
+    old_vocab: usize,
+    hidden_size: usize,
+    new_vocab: usize,
+    new_embed: [*]f32,
+    init_std: f32,
+    seed: u64,
+) c_int {
+    const old_slice = old_embed[0 .. old_vocab * hidden_size];
+    const new_slice = new_embed[0 .. new_vocab * hidden_size];
+    adaptive_mod.expandVocabEmbeddings(old_slice, old_vocab, hidden_size, new_vocab, new_slice, init_std, seed);
+    return 0;
+}
+
+pub export fn hk_init_plasticity_mask(
+    mask: [*]f32,
+    total_units: usize,
+    base_units: usize,
+    decay_rate: f32,
+) c_int {
+    const mask_slice = mask[0..total_units];
+    adaptive_mod.initPlasticityMask(mask_slice, total_units, base_units, decay_rate);
+    return 0;
+}
+
 
 
 

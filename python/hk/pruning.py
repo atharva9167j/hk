@@ -257,9 +257,10 @@ def prune_structured_l2(
         if new_l2_b is not None:
             l2.bias = nn.Parameter(new_l2_b)
 
-        # Check for intermediate batch norm
+        # Check for intermediate batch norm matching l1
+        bn_target_name = l1_name.replace("fc", "bn")
         for m_name, m in model.named_modules():
-            if isinstance(m, nn.BatchNorm1d) and m.num_features == out_features:
+            if isinstance(m, nn.BatchNorm1d) and (m_name == bn_target_name or (m.num_features == out_features and m_name.endswith(l1_name[-1]))):
                 m.num_features = keep_features
                 if m.weight is not None:
                     m.weight = nn.Parameter(m.weight.data[keep_indices].clone())
@@ -269,6 +270,7 @@ def prune_structured_l2(
                     m.running_mean = m.running_mean[keep_indices].clone()
                 if m.running_var is not None:
                     m.running_var = m.running_var[keep_indices].clone()
+                break
 
         break
 

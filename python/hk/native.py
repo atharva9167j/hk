@@ -6,6 +6,7 @@ Direct ctypes dispatch to native Zig SIMD compute engine and file format contain
 import ctypes
 import json
 import os
+import platform
 import struct
 import sys
 import types
@@ -14,18 +15,35 @@ from typing import Optional, Tuple, Dict, Any, Union, List
 import numpy as np
 import torch
 
-# Locate native library (hk.dll / libhk.so / libhk.dylib)
+# Locate native library (hk.dll / libhk.so / libhk.dylib / architecture-specific binaries)
 def _find_native_lib() -> str:
-    possible_names = [
-        "hk.dll",
-        "libhk.so",
-        "libhk.dylib",
-    ]
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    # Prioritize exact OS and architecture match
+    possible_names = []
+    if "windows" in system or sys.platform == "win32":
+        possible_names.extend(["hk.dll", "libhk.dll", "hk-x86_64.dll"])
+    elif "darwin" in system:
+        if "arm" in machine or "aarch64" in machine:
+            possible_names.extend(["libhk-macos-arm64.dylib", "libhk.dylib"])
+        else:
+            possible_names.extend(["libhk-macos-x86_64.dylib", "libhk.dylib"])
+    elif "linux" in system:
+        if "arm" in machine or "aarch64" in machine:
+            possible_names.extend(["libhk-linux-aarch64.so", "libhk.so"])
+        else:
+            possible_names.extend(["libhk-linux-x86_64.so", "libhk.so"])
+
+    # Fallback generic names
+    possible_names.extend(["hk.dll", "libhk.so", "libhk.dylib", "libhk-linux-x86_64.so", "libhk-macos-arm64.dylib"])
+
     search_dirs = [
-        Path(__file__).resolve().parent,
         Path(__file__).resolve().parent.parent.parent / "zig-out" / "bin",
-        Path(__file__).resolve().parent.parent.parent / "zig-out" / "lib",
         Path(os.getcwd()) / "zig-out" / "bin",
+        Path(__file__).resolve().parent,
+        Path(__file__).resolve().parent / "lib",
+        Path(__file__).resolve().parent.parent.parent / "zig-out" / "lib",
         Path(os.getcwd()) / "zig-out" / "lib",
         Path(os.getcwd()),
     ]
@@ -436,6 +454,28 @@ if _LIB is not None:
                 func.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_uint64, ctypes.c_char_p]
             func.restype = ctypes.c_int
 
+    if hasattr(_LIB, "hk_quantize_tensor_nf4"):
+        _LIB.hk_quantize_tensor_nf4.argtypes = [
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint8),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        _LIB.hk_quantize_tensor_nf4.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_dequantize_tensor_nf4"):
+        _LIB.hk_dequantize_tensor_nf4.argtypes = [
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        _LIB.hk_dequantize_tensor_nf4.restype = ctypes.c_int
+
     if hasattr(_LIB, "hk_convert_gguf"):
         _LIB.hk_convert_gguf.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
         _LIB.hk_convert_gguf.restype = ctypes.c_int
@@ -537,6 +577,71 @@ if _LIB is not None:
     if hasattr(_LIB, "hk_convert_safetensors"):
         _LIB.hk_convert_safetensors.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint8]
         _LIB.hk_convert_safetensors.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_hf_detect_architecture"):
+        _LIB.hk_hf_detect_architecture.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t]
+        _LIB.hk_hf_detect_architecture.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_hf_map_tensor_name"):
+        _LIB.hk_hf_map_tensor_name.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_bool, ctypes.c_char_p, ctypes.c_size_t]
+        _LIB.hk_hf_map_tensor_name.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_context_truncate"):
+        _LIB.hk_context_truncate.argtypes = [
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_float,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        _LIB.hk_context_truncate.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_governor_can_grow"):
+        _LIB.hk_governor_can_grow.argtypes = [
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_float,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        _LIB.hk_governor_can_grow.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_governor_can_grow_batch"):
+        _LIB.hk_governor_can_grow_batch.argtypes = [
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.c_size_t,
+            ctypes.c_float,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint8),
+        ]
+        _LIB.hk_governor_can_grow_batch.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_expand_vocab_embeddings"):
+        _LIB.hk_expand_vocab_embeddings.argtypes = [
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_float,
+            ctypes.c_uint64,
+        ]
+        _LIB.hk_expand_vocab_embeddings.restype = ctypes.c_int
+
+    if hasattr(_LIB, "hk_init_plasticity_mask"):
+        _LIB.hk_init_plasticity_mask.argtypes = [
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_float,
+        ]
+        _LIB.hk_init_plasticity_mask.restype = ctypes.c_int
 
 
 def is_native_available() -> bool:
@@ -1204,6 +1309,80 @@ def native_dequantize_tensor_q2_k(packed_bytes: bytes, count: int) -> np.ndarray
     err = _LIB.hk_dequantize_tensor_q2_k(packed_bytes, count, out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
     if err != 0:
         raise RuntimeError(f"Native tensor Q2_K dequantize failed: {err}")
+    return out
+
+
+def native_quantize_tensor_nf4(
+    weights: np.ndarray,
+    block_size: int = 32,
+    compute_residual: bool = False,
+) -> Tuple[bytes, bytes, Optional[bytes]]:
+    """Batch quantizes a full float32 array to NF4 dual-mode using native Zig SIMD without large memory allocations."""
+    if _LIB is None or not hasattr(_LIB, "hk_quantize_tensor_nf4"):
+        raise RuntimeError("Native tensor NF4 quantizer not available")
+    w_c = np.ascontiguousarray(weights, dtype=np.float32)
+    n = w_c.size
+    assert n % block_size == 0
+    num_blocks = n // block_size
+    bytes_per_block = (block_size + 1) // 2
+
+    packed_buf = bytearray(num_blocks * bytes_per_block)
+    c_packed = (ctypes.c_uint8 * len(packed_buf)).from_buffer(packed_buf)
+
+    scales = np.empty(num_blocks, dtype=np.float32)
+    c_scales = scales.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    c_res = None
+    res = None
+    if compute_residual:
+        res = np.empty(n, dtype=np.float32)
+        c_res = res.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    err = _LIB.hk_quantize_tensor_nf4(
+        w_c.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        n,
+        block_size,
+        c_packed,
+        c_scales,
+        c_res,
+    )
+    if err != 0:
+        raise RuntimeError(f"Native tensor NF4 quantize failed: {err}")
+    res_bytes = res.tobytes() if compute_residual and res is not None else None
+    return bytes(packed_buf), scales.tobytes(), res_bytes
+
+
+def native_dequantize_tensor_nf4(
+    packed_bytes: bytes,
+    scales_bytes: bytes,
+    count: int,
+    block_size: int = 32,
+    residual_bytes: Optional[bytes] = None,
+) -> np.ndarray:
+    """Batch dequantizes a full NF4 byte buffer to float32 using native Zig SIMD."""
+    if _LIB is None or not hasattr(_LIB, "hk_dequantize_tensor_nf4"):
+        raise RuntimeError("Native tensor NF4 dequantizer not available")
+    assert count % block_size == 0
+    out = np.empty(count, dtype=np.float32)
+
+    scales = np.ascontiguousarray(np.frombuffer(scales_bytes, dtype=np.float32))
+    c_scales = scales.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    c_res = None
+    if residual_bytes is not None and len(residual_bytes) > 0:
+        res = np.ascontiguousarray(np.frombuffer(residual_bytes, dtype=np.float32))
+        c_res = res.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+    err = _LIB.hk_dequantize_tensor_nf4(
+        packed_bytes,
+        c_scales,
+        count,
+        block_size,
+        out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        c_res,
+    )
+    if err != 0:
+        raise RuntimeError(f"Native tensor NF4 dequantize failed: {err}")
     return out
 
 
@@ -1901,6 +2080,145 @@ def convert_safetensors_to_hk(input_path: Union[str, Path], output_path: Union[s
     ret = _LIB.hk_convert_safetensors(in_b, out_b, ctypes.c_uint8(storage_type))
     if ret != 0:
         raise RuntimeError(f"SafeTensors transcoding failed with exit code {ret}")
+
+
+def native_hf_detect_architecture(json_config_str: str) -> Optional[str]:
+    """Detects canonical architecture from HF JSON config using native Zig engine."""
+    if not is_native_available() or not hasattr(_LIB, "hk_hf_detect_architecture"):
+        return None
+    out_buf = ctypes.create_string_buffer(128)
+    ret = _LIB.hk_hf_detect_architecture(json_config_str.encode("utf-8"), out_buf, 128)
+    if ret == 0:
+        return out_buf.value.decode("utf-8")
+    return None
+
+
+def native_hf_map_tensor_name(name: str, arch: str = "llama", to_hk: bool = True) -> Optional[str]:
+    """Maps tensor name between HF and HK conventions using native Zig engine."""
+    if not is_native_available() or not hasattr(_LIB, "hk_hf_map_tensor_name"):
+        return None
+    out_buf = ctypes.create_string_buffer(512)
+    ret = _LIB.hk_hf_map_tensor_name(name.encode("utf-8"), arch.encode("utf-8"), to_hk, out_buf, 512)
+    if ret == 0:
+        return out_buf.value.decode("utf-8")
+    return None
+
+
+def native_context_truncate(tokens: Union[List[int], np.ndarray], max_tokens: int, strategy: int, head_ratio: float) -> Optional[Union[List[int], np.ndarray]]:
+    """Truncates token sequence using native Zig ContextWindowManager with zero-copy buffer passing."""
+    if not is_native_available() or not hasattr(_LIB, "hk_context_truncate"):
+        return None
+    is_py_list = isinstance(tokens, list)
+    if is_py_list:
+        arr = np.array(tokens, dtype=np.uint32)
+    elif isinstance(tokens, np.ndarray):
+        arr = np.ascontiguousarray(tokens, dtype=np.uint32)
+    else:
+        arr = np.ascontiguousarray(tokens.detach().cpu().numpy(), dtype=np.uint32)
+
+    n = arr.size
+    out_arr = np.empty(max_tokens, dtype=np.uint32)
+    out_len = ctypes.c_size_t(0)
+    ret = _LIB.hk_context_truncate(
+        arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        ctypes.c_size_t(n),
+        ctypes.c_size_t(max_tokens),
+        ctypes.c_int(strategy),
+        ctypes.c_float(head_ratio),
+        out_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+        ctypes.byref(out_len),
+    )
+    if ret == 0:
+        actual = out_arr[:out_len.value]
+        return actual.tolist() if is_py_list else actual
+    return None
+
+
+_GOVERNOR_REASON_BUF = ctypes.create_string_buffer(256)
+
+def native_governor_can_grow(
+    current_params: int,
+    added_params: int,
+    max_growth_ratio: float = 2.0,
+    max_vram_mb: int = 4096,
+    dtype_bytes: int = 4,
+) -> Optional[Tuple[bool, str]]:
+    """Evaluates growth request constraints using native Zig GrowthGovernor."""
+    if not is_native_available() or not hasattr(_LIB, "hk_governor_can_grow"):
+        return None
+    approved = _LIB.hk_governor_can_grow(
+        ctypes.c_uint64(current_params),
+        ctypes.c_uint64(added_params),
+        ctypes.c_float(max_growth_ratio),
+        ctypes.c_uint64(max_vram_mb),
+        ctypes.c_uint32(dtype_bytes),
+        _GOVERNOR_REASON_BUF,
+        256,
+    )
+    if approved == 1:
+        return True, "Approved"
+    return False, _GOVERNOR_REASON_BUF.value.decode("utf-8", errors="replace")
+
+
+def native_governor_can_grow_batch(
+    current_params: np.ndarray,
+    added_params: np.ndarray,
+    max_growth_ratio: float = 2.0,
+    max_vram_mb: int = 4096,
+    dtype_bytes: int = 4,
+) -> Optional[np.ndarray]:
+    """Evaluates growth requests in bulk with a single C-ABI boundary crossing."""
+    if not is_native_available() or not hasattr(_LIB, "hk_governor_can_grow_batch"):
+        return None
+    n = len(current_params)
+    cur_u64 = np.ascontiguousarray(current_params, dtype=np.uint64)
+    add_u64 = np.ascontiguousarray(added_params, dtype=np.uint64)
+    c_cur = cur_u64.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64))
+    c_add = add_u64.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64))
+    out_res = np.empty(n, dtype=np.uint8)
+    c_out = out_res.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+    ret = _LIB.hk_governor_can_grow_batch(
+        c_cur,
+        c_add,
+        ctypes.c_size_t(n),
+        ctypes.c_float(max_growth_ratio),
+        ctypes.c_uint64(max_vram_mb),
+        ctypes.c_uint32(dtype_bytes),
+        c_out,
+    )
+    if ret == 0:
+        return out_res.astype(bool)
+    return None
+
+
+def native_expand_vocab_embeddings(
+    old_embed: np.ndarray,
+    new_vocab: int,
+    init_std: float = 0.02,
+    seed: int = 42,
+) -> Optional[np.ndarray]:
+    """Expands embedding tensor capacity natively with exact function preservation."""
+    if not is_native_available() or not hasattr(_LIB, "hk_expand_vocab_embeddings"):
+        return None
+    old_vocab, hidden_size = old_embed.shape
+    if new_vocab <= old_vocab:
+        return old_embed
+    new_embed = np.empty((new_vocab, hidden_size), dtype=np.float32)
+    c_old = old_embed.astype(np.float32).ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    c_new = new_embed.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    ret = _LIB.hk_expand_vocab_embeddings(
+        c_old,
+        ctypes.c_size_t(old_vocab),
+        ctypes.c_size_t(hidden_size),
+        ctypes.c_size_t(new_vocab),
+        c_new,
+        ctypes.c_float(init_std),
+        ctypes.c_uint64(seed),
+    )
+    if ret == 0:
+        return new_embed
+    return None
+
 
 
 

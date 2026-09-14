@@ -70,48 +70,43 @@ class ContextWindowManager:
         strat = strategy if strategy is not None else self.default_strategy
         ratio = head_ratio if head_ratio is not None else self.head_ratio
 
-        is_tensor = isinstance(tokens, torch.Tensor)
-        if is_tensor:
-            device = tokens.device
-            dtype = tokens.dtype
-            # Handle 2D [batch, seq] or 1D [seq]
-            if tokens.ndim == 2:
-                batch_size, seq_len = tokens.shape
-                if seq_len <= limit:
-                    return tokens
-                truncated_rows = [
-                    self.truncate(tokens[i].tolist(), max_tokens=limit, strategy=strat, head_ratio=ratio)
-                    for i in range(batch_size)
-                ]
-                return torch.tensor(truncated_rows, dtype=dtype, device=device)
-            elif tokens.ndim == 1:
-                token_list = tokens.tolist()
-            else:
+        if isinstance(tokens, torch.Tensor):
+            seq_len = tokens.shape[-1]
+            if seq_len <= limit:
                 return tokens
-        else:
-            token_list = list(tokens)
 
+            if strat == "tail" or strat == "sliding_window":
+                return tokens[..., -limit:]
+            elif strat == "head":
+                return tokens[..., :limit]
+            elif strat == "middle_out":
+                head_len = max(1, int(limit * ratio))
+                tail_len = limit - head_len
+                if tail_len <= 0:
+                    return tokens[..., :limit]
+                return torch.cat([tokens[..., :head_len], tokens[..., -tail_len:]], dim=-1)
+            else:
+                return tokens[..., -limit:]
+
+        token_list = list(tokens)
         total = len(token_list)
         if total <= limit:
-            return torch.tensor(token_list) if is_tensor else token_list
+            return token_list
 
         if strat == "tail":
-            result = token_list[-limit:]
+            return token_list[-limit:]
         elif strat == "head":
-            result = token_list[:limit]
+            return token_list[:limit]
         elif strat == "middle_out":
             head_len = max(1, int(limit * ratio))
             tail_len = limit - head_len
             if tail_len <= 0:
-                result = token_list[:limit]
-            else:
-                result = token_list[:head_len] + token_list[-tail_len:]
+                return token_list[:limit]
+            return token_list[:head_len] + token_list[-tail_len:]
         elif strat == "sliding_window":
-            result = token_list[-limit:]
+            return token_list[-limit:]
         else:
-            result = token_list[-limit:]
-
-        return torch.tensor(result, dtype=dtype, device=device) if is_tensor else result
+            return token_list[-limit:]
 
     @staticmethod
     def apply_rope_scaling(

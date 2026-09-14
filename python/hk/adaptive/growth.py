@@ -24,6 +24,17 @@ class GrowthGovernor:
 
     def can_grow(self, current_params: int, additional_params: int, dtype_bytes: int = 4) -> Tuple[bool, str]:
         """Validates whether proposed expansion fits within hardware memory budgets."""
+        from hk.native import native_governor_can_grow
+        native_res = native_governor_can_grow(
+            current_params,
+            additional_params,
+            self.max_growth_ratio,
+            self.max_vram_mb,
+            dtype_bytes,
+        )
+        if native_res is not None:
+            return native_res
+
         total_params = current_params + additional_params
         if total_params > current_params * self.max_growth_ratio:
             return False, f"Growth ratio {(total_params/current_params):.2f}x exceeds max limit {self.max_growth_ratio}x"

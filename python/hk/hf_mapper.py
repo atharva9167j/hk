@@ -571,6 +571,11 @@ class HFArchitectureMapper:
     @classmethod
     def map_tensor_name_to_hk(cls, name: str, architecture: str = "llama") -> str:
         """Translates a Hugging Face tensor name into HK format using architecture-specific tables."""
+        from .native import native_hf_map_tensor_name
+        native_res = native_hf_map_tensor_name(name, arch=architecture, to_hk=True)
+        if native_res is not None and native_res != name:
+            return native_res
+
         canonical = SUPPORTED_ARCHITECTURES.get(architecture, architecture.lower())
         patterns = get_architecture_tensor_mappings(canonical)
         for pattern, repl in patterns:
@@ -586,6 +591,11 @@ class HFArchitectureMapper:
     @classmethod
     def map_tensor_name_to_hf(cls, name: str, architecture: str = "llama") -> str:
         """Translates an HK tensor name back into Hugging Face name using architecture tables."""
+        from .native import native_hf_map_tensor_name
+        native_res = native_hf_map_tensor_name(name, arch=architecture, to_hk=False)
+        if native_res is not None and native_res != name:
+            return native_res
+
         canonical = SUPPORTED_ARCHITECTURES.get(architecture, architecture.lower())
         patterns = build_reverse_mappings(get_architecture_tensor_mappings(canonical))
         for pattern, repl in patterns:

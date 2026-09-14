@@ -27,6 +27,8 @@ bindings/java/com/hk/*.class
 node_modules/
 bindings/js/node_modules/
 bindings/js/*.js.map
+*.tgz
+
 
 # Temporary Scratch & Diagnostic Files
 scratch/test_*

@@ -371,6 +371,59 @@ HK_API int hk_layernorm_offset(const float* in_w, float* out_w, uint64_t count, 
 HK_API int hk_convert_gguf(const char* in_gguf_path, const char* out_hk_path);
 HK_API int hk_export_gguf(const char* in_hk_path, const char* out_gguf_path);
 
+// Hugging Face Architecture Mapper C ABI
+HK_API int hk_hf_detect_architecture(const char* json_config, char* out_arch, size_t max_len);
+HK_API int hk_hf_map_tensor_name(const char* tensor_name, const char* arch, int to_hk, char* out_name, size_t max_len);
+
+// Native Context Window Management C ABI
+HK_API int hk_context_truncate(
+    const uint32_t* in_tokens,
+    size_t in_len,
+    size_t max_tokens,
+    int strategy,
+    float head_ratio,
+    uint32_t* out_tokens,
+    size_t* out_len
+);
+
+// Native Adaptive Autonomous Framework C ABI
+HK_API int hk_governor_can_grow(
+    uint64_t current_params,
+    uint64_t added_params,
+    float max_growth_ratio,
+    uint64_t max_vram_mb,
+    uint32_t dtype_bytes,
+    char* out_reason,
+    size_t max_reason_len
+);
+
+HK_API int hk_governor_can_grow_batch(
+    const uint64_t* current_params,
+    const uint64_t* added_params,
+    size_t n,
+    float max_growth_ratio,
+    uint64_t max_vram_mb,
+    uint32_t dtype_bytes,
+    uint8_t* out_results
+);
+
+HK_API int hk_expand_vocab_embeddings(
+    const float* old_embed,
+    size_t old_vocab,
+    size_t hidden_size,
+    size_t new_vocab,
+    float* new_embed,
+    float init_std,
+    uint64_t seed
+);
+
+HK_API int hk_init_plasticity_mask(
+    float* mask,
+    size_t total_units,
+    size_t base_units,
+    float decay_rate
+);
+
 #ifdef __cplusplus
 }
 #endif

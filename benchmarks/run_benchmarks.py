@@ -368,29 +368,52 @@ def run_container_load_benchmarks():
 
         iters = 50
 
+        # 1. Full file load
         t0 = time.perf_counter()
         for _ in range(iters):
-            st_loaded = safetensors.torch.load_file(st_path)
-        st_full_ms = ((time.perf_counter() - t0) / iters) * 1000.0
+            _ = safetensors.torch.load_file(st_path)
+        st_load_ms = ((time.perf_counter() - t0) / iters) * 1000.0
+
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            _ = hk.load_file(hk_path)
+        hk_load_ms = ((time.perf_counter() - t0) / iters) * 1000.0
+
+        # 2. Direct slicing (pre-opened handle)
+        st_f = safetensors.safe_open(st_path, framework="pt")
+        hk_f = hk.safe_open(hk_path, framework="pt")
+
+        t0 = time.perf_counter()
+        for _ in range(iters * 10):
+            _ = st_f.get_slice("layer.4.mlp.down_proj.weight")[0:128, 0:512]
+        st_slice_ms = ((time.perf_counter() - t0) / (iters * 10)) * 1000.0
+
+        t0 = time.perf_counter()
+        for _ in range(iters * 10):
+            _ = hk_f.get_slice("layer.4.mlp.down_proj.weight")[0:128, 0:512]
+        hk_slice_ms = ((time.perf_counter() - t0) / (iters * 10)) * 1000.0
+
+        # 3. Context-manager lifecycle: open + slice
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            with safetensors.safe_open(st_path, framework="pt") as f:
+                _ = f.get_slice("layer.4.mlp.down_proj.weight")[0:128, 0:512]
+        st_open_slice_ms = ((time.perf_counter() - t0) / iters) * 1000.0
 
         t0 = time.perf_counter()
         for _ in range(iters):
             with hk.safe_open(hk_path, framework="pt") as f:
-                slice_val = f.get_slice("layer.4.mlp.down_proj.weight")[0:128, 0:512]
-        hk_slice_ms = ((time.perf_counter() - t0) / iters) * 1000.0
+                _ = f.get_slice("layer.4.mlp.down_proj.weight")[0:128, 0:512]
+        hk_open_slice_ms = ((time.perf_counter() - t0) / iters) * 1000.0
 
-        t0 = time.perf_counter()
-        for _ in range(iters):
-            with hk.safe_open(hk_path, framework="pt") as f:
-                for k in f.keys():
-                    _ = f.get_tensor(k)
-        hk_full_ms = ((time.perf_counter() - t0) / iters) * 1000.0
-
-        headers = ["Reader / Loader Access Pattern", "Container Size", "Operation", "Latency (ms)", "Speedup"]
+        headers = ["Reader / Loader Access Pattern", "Container Size", "Operation", "Latency (ms)", "Relative Perf"]
         rows = [
-            ["SafeTensors (Full dict load)", f"{total_mb:.2f} MB", "Full Load (32 tensors)", f"{st_full_ms:.3f} ms", "1.00x"],
-            ["HK Native (safe_open full read)", f"{total_mb:.2f} MB", "Iterative Mmap Read", f"{hk_full_ms:.3f} ms", f"{st_full_ms / hk_full_ms:.2f}x"],
-            ["HK Native (safe_open slice)", f"{total_mb:.2f} MB", "Zero-Copy 2D Slice [128, 512]", f"{hk_slice_ms:.3f} ms", f"{st_full_ms / hk_slice_ms:.1f}x"],
+            ["SafeTensors (load_file)", f"{total_mb:.2f} MB", "Full Load (32 tensors)", f"{st_load_ms:.3f} ms", "1.00x"],
+            ["HK Native (load_file)", f"{total_mb:.2f} MB", "Full Load Zero-Copy", f"{hk_load_ms:.3f} ms", f"{st_load_ms / hk_load_ms:.2f}x faster"],
+            ["SafeTensors (get_slice direct)", f"{total_mb:.2f} MB", "Direct 2D Slice [128, 512]", f"{st_slice_ms:.4f} ms", "1.00x"],
+            ["HK Native (get_slice direct)", f"{total_mb:.2f} MB", "Direct 2D Slice [128, 512]", f"{hk_slice_ms:.4f} ms", f"{st_slice_ms / hk_slice_ms:.2f}x faster"],
+            ["SafeTensors (safe_open lifecycle)", f"{total_mb:.2f} MB", "Open + Slice Context", f"{st_open_slice_ms:.3f} ms", "1.00x"],
+            ["HK Native (safe_open lifecycle)", f"{total_mb:.2f} MB", "Open + Slice Context", f"{hk_open_slice_ms:.3f} ms", f"{st_open_slice_ms / hk_open_slice_ms:.2f}x"],
         ]
         table_md = format_table(headers, rows)
         print(table_md, flush=True)

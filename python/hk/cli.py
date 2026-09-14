@@ -126,7 +126,35 @@ def cmd_gui(args):
     launch_gui(args.file)
 
 
+def _find_native_cli() -> Optional[str]:
+    """Locates the compiled standalone native Zig HK executable."""
+    search_dirs = [
+        Path(__file__).resolve().parent,
+        Path(__file__).resolve().parent / "bin",
+        Path(__file__).resolve().parent.parent.parent / "zig-out" / "bin",
+        Path(os.getcwd()) / "zig-out" / "bin",
+    ]
+    exe_names = ["hk.exe", "hk"]
+    for d in search_dirs:
+        for name in exe_names:
+            candidate = d / name
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
 def main():
+    # If not requesting python-specific GUI command, check for compiled native Zig binary
+    if len(sys.argv) > 1 and sys.argv[1] not in ("gui", "--help", "-h"):
+        native_cli = _find_native_cli()
+        if native_cli is not None:
+            import subprocess
+            try:
+                ret = subprocess.call([native_cli] + sys.argv[1:])
+                sys.exit(ret)
+            except Exception:
+                pass
+
     parser = argparse.ArgumentParser(
         prog="hk",
         description=f"HK Neural Tensor Framework CLI v{__version__}",

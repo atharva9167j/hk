@@ -19,6 +19,10 @@ pub const tokenizer = @import("tokenizer.zig");
 pub const sampling = @import("sampling.zig");
 pub const inference = @import("inference.zig");
 pub const safetensors = @import("safetensors.zig");
+pub const hf_mapper = @import("hf_mapper.zig");
+pub const context = @import("context.zig");
+pub const pipeline = @import("pipeline.zig");
+pub const adaptive = @import("adaptive.zig");
 pub const c_api = @import("c_api.zig");
 
 // Re-export key structs

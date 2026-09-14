@@ -8,6 +8,7 @@ import json
 import mmap
 import os
 import struct
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -295,41 +296,13 @@ def _load_single_file(
     device: Union[str, torch.device] = "cpu",
     with_residual: bool = True,
 ) -> Dict[str, torch.Tensor]:
-    reader = NativeHKReader(str(filename))
-    state_dict = {}
-    shared_tensors: List[Tuple[str, Any]] = []
+    hk_file = HKFile(filename, framework="pt", device=device, with_residual=with_residual)
+    state_dict: Dict[str, torch.Tensor] = {}
     try:
-        for name, meta in reader.tensors.items():
-            stype = meta["storage_type"]
-            shape = meta["shape"]
-
-            if stype == STORAGE_SHARED_REF:
-                shared_tensors.append((name, meta))
-                continue
-
-            raw_bytes = reader.get_raw_data(name)
-            if stype in STORAGE_TO_TORCH_DTYPE:
-                dtype = STORAGE_TO_TORCH_DTYPE[stype]
-                t = torch.frombuffer(bytearray(raw_bytes), dtype=dtype).reshape(shape)
-            else:
-                arr = reader.dequantize(name, with_residual=with_residual)
-                t = torch.from_numpy(arr)
-
-            if str(device) != "cpu":
-                t = t.to(device)
-            state_dict[name] = t
-
-        for shared_name, shared_meta in shared_tensors:
-            matched = False
-            for primary_name, primary_t in state_dict.items():
-                if tuple(primary_t.shape) == shared_meta["shape"]:
-                    state_dict[shared_name] = primary_t
-                    matched = True
-                    break
-            if not matched:
-                state_dict[shared_name] = torch.zeros(shared_meta["shape"], device=device)
+        for name in hk_file.keys():
+            state_dict[name] = hk_file.get_tensor(name)
     finally:
-        reader.close()
+        hk_file.close()
     return state_dict
 
 
@@ -657,6 +630,50 @@ class TensorSlice:
         return t[item]
 
 
+def _open_mmap_shared(filename: Union[str, Path, os.PathLike], access=mmap.ACCESS_COPY):
+    """
+    Opens and memory-maps a file with full delete sharing (FILE_SHARE_DELETE on Windows).
+    Enables true zero-copy access while permitting safe file unlinking/deletion across all platforms.
+    """
+    path_str = str(filename)
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        kernel32 = ctypes.windll.kernel32
+        GENERIC_READ = 0x80000000
+        FILE_SHARE_READ = 1
+        FILE_SHARE_WRITE = 2
+        FILE_SHARE_DELETE = 4
+        OPEN_EXISTING = 3
+        FILE_ATTRIBUTE_NORMAL = 0x80
+        handle = kernel32.CreateFileW(
+            path_str,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        if handle == -1 or handle == 0xFFFFFFFFFFFFFFFF:
+            raise OSError(ctypes.GetLastError(), f"Failed to open {path_str}")
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+        f = os.fdopen(fd, "rb")
+        try:
+            mm = mmap.mmap(f.fileno(), 0, access=access)
+        except Exception:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        f.close()
+        return None, mm
+    else:
+        f = open(path_str, "rb")
+        try:
+            mm = mmap.mmap(f.fileno(), 0, access=access)
+        except Exception:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        return f, mm
+
+
 class HKFile:
     """
     Context manager for lazy inspection, on-demand tensor loading, and slicing of .hk files.
@@ -681,8 +698,7 @@ class HKFile:
         self.device = str(device) if device is not None else "cpu"
         self.with_residual = with_residual
 
-        self._f = open(self.filename, "rb")
-        self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
+        self._f, self._mm = _open_mmap_shared(self.filename)
         self.metadata_dict: Dict[str, str] = {}
         self.tensors_info: Dict[str, Dict[str, Any]] = {}
         self.tensor_names: List[str] = []
@@ -820,7 +836,7 @@ class HKFile:
         if st == STORAGE_SHARED_REF:
             for prev_name in self.tensor_names:
                 prev_info = self.tensors_info[prev_name]
-                if prev_info["data_offset"] == info["data_offset"] and prev_info["storage_type"] != STORAGE_SHARED_REF:
+                if (prev_info["data_offset"] == info["data_offset"] or tuple(prev_info["shape"]) == tuple(info["shape"])) and prev_info["storage_type"] != STORAGE_SHARED_REF:
                     return self.get_tensor(prev_name)
 
         # 2:4 Structured Sparse
@@ -894,7 +910,7 @@ class HKFile:
             t = dequantize_q8_k(raw_data, info["shape"])
             return self._to_framework(t.detach().cpu().numpy(), stype=st)
 
-        # Dense types
+        # Dense unquantized storage types (F32, F16, BF16, INT8, INT32, INT64, UINT8, BOOL)
         if st == STORAGE_F16:
             np_dtype = np.float16
         elif st == STORAGE_BF16:
@@ -916,17 +932,50 @@ class HKFile:
         for dim in info["shape"]:
             numel *= dim
 
-        arr = np.frombuffer(self._mm, dtype=np_dtype, count=numel, offset=info["data_offset"]).copy()
+        if self.framework in ("pt", "torch", "pytorch"):
+            torch_dtype = STORAGE_TO_TORCH_DTYPE.get(st, torch.float32)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*The given buffer is not writable.*")
+                t = torch.frombuffer(self._mm, dtype=torch_dtype, count=numel, offset=info["data_offset"])
 
-        if info["tile_layout"] == TILE_16X16 and len(info["shape"]) == 2:
-            M, K = info["shape"]
-            pad_m = (16 - (M % 16)) % 16
-            pad_k = (16 - (K % 16)) % 16
-            tiled_view = torch.from_numpy(arr).view((M + pad_m) // 16, (K + pad_k) // 16, 16, 16)
-            arr = untile_matrix_16x16(tiled_view, (M, K)).detach().cpu().numpy()
-        else:
-            arr = arr.reshape(info["shape"])
+            if info["tile_layout"] == TILE_16X16 and len(info["shape"]) == 2:
+                M, K = info["shape"]
+                pad_m = (16 - (M % 16)) % 16
+                pad_k = (16 - (K % 16)) % 16
+                tiled_view = t.view((M + pad_m) // 16, (K + pad_k) // 16, 16, 16)
+                t = untile_matrix_16x16(tiled_view, (M, K))
+            else:
+                t = t.view(info["shape"])
 
+            if self.device != "cpu" and self.device:
+                t = t.to(self.device)
+            return t
+
+        if self.framework in ("np", "numpy"):
+            arr = np.frombuffer(self._mm, dtype=np_dtype, count=numel, offset=info["data_offset"])
+            if info["tile_layout"] == TILE_16X16 and len(info["shape"]) == 2:
+                M, K = info["shape"]
+                pad_m = (16 - (M % 16)) % 16
+                pad_k = (16 - (K % 16)) % 16
+                tiled_view = torch.from_numpy(arr).view((M + pad_m) // 16, (K + pad_k) // 16, 16, 16)
+                arr = untile_matrix_16x16(tiled_view, (M, K)).detach().cpu().numpy()
+            else:
+                arr = arr.reshape(info["shape"])
+            return arr
+
+        if self.framework in ("jax", "flax"):
+            import jax
+            import jax.numpy as jnp
+            arr = np.frombuffer(self._mm, dtype=np_dtype, count=numel, offset=info["data_offset"]).reshape(info["shape"])
+            j_arr = jnp.asarray(arr)
+            if self.device != "cpu" and self.device:
+                try:
+                    return jax.device_put(j_arr, self.device)
+                except Exception:
+                    pass
+            return j_arr
+
+        arr = np.frombuffer(self._mm, dtype=np_dtype, count=numel, offset=info["data_offset"]).reshape(info["shape"])
         return self._to_framework(arr, stype=st)
 
     def get_slice(self, name: str) -> TensorSlice:
@@ -936,19 +985,14 @@ class HKFile:
         return TensorSlice(self, name, self.tensors_info[name])
 
     def close(self):
-        """Releases the memory map and closes the file handle."""
-        if self._mm is not None:
-            try:
-                self._mm.close()
-            except Exception:
-                pass
-            self._mm = None
+        """Releases the file handle while preserving memory map reference count for tensors."""
         if self._f is not None:
             try:
                 self._f.close()
             except Exception:
                 pass
             self._f = None
+        self._mm = None
 
     def __enter__(self):
         return self
