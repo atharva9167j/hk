@@ -283,22 +283,26 @@ pub fn mapOrReadFile(path: []const u8, allocator: std.mem.Allocator) !MmapRegion
     }
 
     // POSIX zero-copy path: real mmap(2), matching the CreateFileMapping/MapViewOfFile
-    // path already implemented above for Windows.
-    if (std.posix.mmap(
-        null,
-        size,
-        .{ .READ = true },
-        .{ .TYPE = .PRIVATE },
-        file.handle,
-        0,
-    )) |mapped| {
-        return MmapRegion{
-            .bytes = mapped,
-            .is_mmap = true,
-        };
-    } else |_| {
-        // Fall through to a buffered read (e.g. non-regular file, or mmap
-        // unsupported/denied on this filesystem).
+    // path already implemented above for Windows. std.posix.MAP/PROT are stubbed to
+    // `void` on non-POSIX targets, so this must not be typechecked when building for
+    // Windows even though that branch is unreachable there at runtime.
+    if (@import("builtin").os.tag != .windows) {
+        if (std.posix.mmap(
+            null,
+            size,
+            .{ .READ = true },
+            .{ .TYPE = .PRIVATE },
+            file.handle,
+            0,
+        )) |mapped| {
+            return MmapRegion{
+                .bytes = mapped,
+                .is_mmap = true,
+            };
+        } else |_| {
+            // Fall through to a buffered read (e.g. non-regular file, or mmap
+            // unsupported/denied on this filesystem).
+        }
     }
 
     const aligned_slice = try allocator.alignedAlloc(u8, .fromByteUnits(PAGE_SIZE), size);
