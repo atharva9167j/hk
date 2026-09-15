@@ -40,7 +40,7 @@ from hk.trainer import HKTrainer, HKTrainingArguments
 
 # Load model
 config = HKConfig.from_pretrained("model.hk")
-model = HKForCausalLM(config)
+model = HKForCausalLM.from_pretrained("model.hk", config=config)
 
 # Configure Full Fine-Tuning (FFT)
 args = HKTrainingArguments(

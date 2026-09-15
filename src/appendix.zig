@@ -98,19 +98,25 @@ pub const AppendixReader = struct {
         for (1..self.records.items.len) |i| {
             const prev = self.records.items[i - 1];
             const curr = self.records.items[i];
-            var hasher = Sha256.init(.{});
-            hasher.update(prev.data);
-            var expected_hash: [32]u8 = undefined;
-            hasher.final(&expected_hash);
 
-            var all_zero = true;
-            for (curr.parent_hash) |b| {
-                if (b != 0) {
-                    all_zero = false;
-                    break;
-                }
-            }
-            if (!all_zero and !std.mem.eql(u8, &curr.parent_hash, &expected_hash)) {
+            // 1. Verify against complete record hash (name + target + payload)
+            var full_hasher = Sha256.init(.{});
+            full_hasher.update(prev.name);
+            full_hasher.update(prev.target);
+            full_hasher.update(prev.data);
+            var expected_full_hash: [32]u8 = undefined;
+            full_hasher.final(&expected_full_hash);
+
+            // 2. Verify against payload-only hash for backwards compatibility
+            var payload_hasher = Sha256.init(.{});
+            payload_hasher.update(prev.data);
+            var expected_payload_hash: [32]u8 = undefined;
+            payload_hasher.final(&expected_payload_hash);
+
+            const matches_full = std.mem.eql(u8, &curr.parent_hash, &expected_full_hash);
+            const matches_payload = std.mem.eql(u8, &curr.parent_hash, &expected_payload_hash);
+
+            if (!matches_full and !matches_payload) {
                 return false;
             }
         }
@@ -118,49 +124,34 @@ pub const AppendixReader = struct {
     }
 };
 
-/// Append a new record directly to an existing HK file on disk
+/// Append a new record directly to an existing HK file on disk (O(1) memory and O(record_size) I/O)
 pub fn appendRecordToFile(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     record: AppendixRecord,
 ) !void {
     var region = try platform.mapOrReadFile(file_path, allocator);
-    var region_open = true;
-    defer if (region_open) region.deinit(allocator);
-
-    if (region.bytes.len < @sizeOf(FileHeader)) return AppendixError.InvalidMagic;
+    if (region.bytes.len < @sizeOf(FileHeader)) {
+        region.deinit(allocator);
+        return AppendixError.InvalidMagic;
+    }
     const old_header_ptr: *const FileHeader = @ptrCast(@alignCast(region.bytes.ptr));
-    if (!old_header_ptr.isValid()) return AppendixError.InvalidMagic;
+    if (!old_header_ptr.isValid()) {
+        region.deinit(allocator);
+        return AppendixError.InvalidMagic;
+    }
     const old_header = old_header_ptr.*;
-
     const file_size = region.bytes.len;
     const append_offset = std.mem.alignForward(usize, file_size, 8);
     const rec_body_len = @sizeOf(AppendixRecordHeader) + record.name.len + record.target.len + record.data.len;
     const aligned_rec_len = std.mem.alignForward(usize, rec_body_len, 8);
-    const new_file_size = append_offset + aligned_rec_len;
+    const pad_gap = append_offset - file_size;
+    const total_append_bytes = pad_gap + aligned_rec_len;
 
-    const new_buf = try allocator.alloc(u8, new_file_size);
-    defer allocator.free(new_buf);
+    const rec_buf = try allocator.alloc(u8, total_append_bytes);
+    defer allocator.free(rec_buf);
+    @memset(rec_buf, 0);
 
-    // Copy existing file content
-    @memcpy(new_buf[0..file_size], region.bytes);
-    region.deinit(allocator);
-    region_open = false;
-    // Zero out any alignment gap between old file_size and append_offset
-    if (append_offset > file_size) {
-        @memset(new_buf[file_size..append_offset], 0);
-    }
-
-    // Update Header in new buffer
-    var new_hdr = old_header;
-    if (new_hdr.appendix_offset == 0) {
-        new_hdr.appendix_offset = @intCast(append_offset);
-        new_hdr.flags |= format.HeaderFlags.HAS_APPENDIX;
-    }
-    const hdr_bytes = std.mem.asBytes(&new_hdr);
-    @memcpy(new_buf[0..@sizeOf(FileHeader)], hdr_bytes);
-
-    // Write AppendixRecordHeader
     const rec_hdr = AppendixRecordHeader{
         .entry_type = @intFromEnum(record.entry_type),
         .flags = record.flags,
@@ -177,48 +168,59 @@ pub fn appendRecordToFile(
         .data_crc32 = 0,
         .data_size = record.data.len,
     };
-    const rec_hdr_bytes = std.mem.asBytes(&rec_hdr);
 
-    var cur = append_offset;
-    @memcpy(new_buf[cur .. cur + @sizeOf(AppendixRecordHeader)], rec_hdr_bytes);
+    var cur = pad_gap;
+    @memcpy(rec_buf[cur .. cur + @sizeOf(AppendixRecordHeader)], std.mem.asBytes(&rec_hdr));
     cur += @sizeOf(AppendixRecordHeader);
 
-    @memcpy(new_buf[cur .. cur + record.name.len], record.name);
+    @memcpy(rec_buf[cur .. cur + record.name.len], record.name);
     cur += record.name.len;
 
-    @memcpy(new_buf[cur .. cur + record.target.len], record.target);
+    @memcpy(rec_buf[cur .. cur + record.target.len], record.target);
     cur += record.target.len;
 
-    @memcpy(new_buf[cur .. cur + record.data.len], record.data);
+    @memcpy(rec_buf[cur .. cur + record.data.len], record.data);
     cur += record.data.len;
 
-    // Pad trailing bytes to 8-byte boundary
-    if (cur < new_file_size) {
-        @memset(new_buf[cur..new_file_size], 0);
+    var new_hdr = old_header;
+    const update_header = (new_hdr.appendix_offset == 0);
+    if (update_header) {
+        new_hdr.appendix_offset = @intCast(append_offset);
+        new_hdr.flags |= format.HeaderFlags.HAS_APPENDIX;
     }
 
-    // Write back atomically
-    const io = std.Options.debug_io;
-    const cwd = std.Io.Dir.cwd();
-    var out_file = try cwd.createFile(io, file_path, .{});
-    defer out_file.close(io);
-    try out_file.writeStreamingAll(io, new_buf);
+    // Release mapping handle prior to writing
+    region.deinit(allocator);
+
+    // Append record at end of file
+    try platform.writeBytesAtOffset(file_path, rec_buf, file_size, allocator);
+
+    // Update header if first appendix entry
+    if (update_header) {
+        try platform.writeBytesAtOffset(file_path, std.mem.asBytes(&new_hdr), 0, allocator);
+    }
 }
 
-/// Rollback an HK file by truncating appendix records beyond target_generation
+/// Rollback an HK file by truncating appendix records beyond target_generation in-place (O(1))
 pub fn rollbackToFile(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     target_generation: u32,
 ) !void {
     var region = try platform.mapOrReadFile(file_path, allocator);
-    var region_open = true;
-    defer if (region_open) region.deinit(allocator);
-
-    if (region.bytes.len < @sizeOf(FileHeader)) return AppendixError.InvalidMagic;
+    if (region.bytes.len < @sizeOf(FileHeader)) {
+        region.deinit(allocator);
+        return AppendixError.InvalidMagic;
+    }
     const header: *const FileHeader = @ptrCast(@alignCast(region.bytes.ptr));
-    if (!header.isValid()) return AppendixError.InvalidMagic;
-    if (header.appendix_offset == 0 or header.appendix_offset >= region.bytes.len) return;
+    if (!header.isValid()) {
+        region.deinit(allocator);
+        return AppendixError.InvalidMagic;
+    }
+    if (header.appendix_offset == 0 or header.appendix_offset >= region.bytes.len) {
+        region.deinit(allocator);
+        return;
+    }
 
     var offset: usize = @intCast(header.appendix_offset);
     var truncate_pos: usize = offset;
@@ -242,36 +244,20 @@ pub fn rollbackToFile(
         }
     }
 
-    const io = std.Options.debug_io;
-    const cwd = std.Io.Dir.cwd();
-
-    if (!found and target_generation == 0) {
-        // Rollback all appendix entries: reset appendix_offset to 0
-        var new_buf = try allocator.alloc(u8, @intCast(header.appendix_offset));
-        defer allocator.free(new_buf);
-        @memcpy(new_buf, region.bytes[0..@intCast(header.appendix_offset)]);
-
-        var hdr_copy = header.*;
+    const needs_header_reset = (!found and target_generation == 0);
+    var hdr_copy = header.*;
+    if (needs_header_reset) {
         hdr_copy.appendix_offset = 0;
         hdr_copy.flags &= ~format.HeaderFlags.HAS_APPENDIX;
-        const hdr_bytes = std.mem.asBytes(&hdr_copy);
-        @memcpy(new_buf[0..@sizeOf(FileHeader)], hdr_bytes);
-
-        region.deinit(allocator);
-        region_open = false;
-
-        var out_file = try cwd.createFile(io, file_path, .{});
-        defer out_file.close(io);
-        try out_file.writeStreamingAll(io, new_buf);
-    } else {
-        const out_slice = try allocator.dupe(u8, region.bytes[0..truncate_pos]);
-        defer allocator.free(out_slice);
-
-        region.deinit(allocator);
-        region_open = false;
-
-        var out_file = try cwd.createFile(io, file_path, .{});
-        defer out_file.close(io);
-        try out_file.writeStreamingAll(io, out_slice);
     }
+    const truncate_size: u64 = if (needs_header_reset) header.appendix_offset else truncate_pos;
+
+    // Release mapping handle prior to truncating/writing
+    region.deinit(allocator);
+
+    if (needs_header_reset) {
+        try platform.writeBytesAtOffset(file_path, std.mem.asBytes(&hdr_copy), 0, allocator);
+    }
+
+    try platform.truncateFile(file_path, truncate_size, allocator);
 }

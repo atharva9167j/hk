@@ -1,6 +1,6 @@
 # HK Neural Tensor Framework
 
-[![Version](https://img.shields.io/badge/Version-1.0.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.0.2-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Python%20Tests-82%2F82%20Passing-brightgreen.svg)](tests/)
 [![Native Tests](https://img.shields.io/badge/Zig%20Tests-49%2F49%20Passing-brightgreen.svg)](tests/)
@@ -107,7 +107,7 @@ from hk import HKConfig, HKForCausalLM
 from hk.trainer import HKTrainer, HKTrainingArguments
 
 config = HKConfig.from_pretrained("model.hk")
-model = HKForCausalLM(config)
+model = HKForCausalLM.from_pretrained("model.hk", config=config)
 
 args = HKTrainingArguments(
     output_dir="./checkpoints",

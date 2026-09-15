@@ -47,9 +47,15 @@ HEADER_SIZE = 128
 REC_HEADER_FORMAT = "<BBHIQ32sffffHHIQ" # 80 bytes (entry_type, flags, name_len, generation, timestamp, parent_hash[32], loss, acc, pass, custom, target_len, reserved, crc32, data_size)
 REC_HEADER_SIZE = 80
 
-def compute_parent_hash(data: bytes) -> bytes:
-    """Computes SHA-256 digest of binary payload."""
-    return hashlib.sha256(data).digest()
+def compute_parent_hash(data: bytes, name: str = "", target: str = "") -> bytes:
+    """Computes SHA-256 digest of record payload, including optional name and target."""
+    h = hashlib.sha256()
+    if name:
+        h.update(name.encode("utf-8"))
+    if target:
+        h.update(target.encode("utf-8"))
+    h.update(data)
+    return h.digest()
 
 def read_appendix(file_path: str) -> List[AppendixRecord]:
     """Parses all appendix records from an HK container."""
@@ -224,8 +230,9 @@ def verify_lineage(records_or_path: Union[List[AppendixRecord], str]) -> bool:
     for i in range(1, len(records)):
         prev = records[i - 1]
         curr = records[i]
-        expected_parent = compute_parent_hash(prev.data)
-        if curr.parent_hash != b"\x00" * 32 and curr.parent_hash != expected_parent:
+        expected_full = compute_parent_hash(prev.data, prev.name, prev.target)
+        expected_payload = compute_parent_hash(prev.data)
+        if curr.parent_hash != expected_full and curr.parent_hash != expected_payload:
             return False
     return True
 
@@ -253,6 +260,12 @@ class AppendixManager:
             pass_rate=metrics.get("pass_rate", 0.0) if metrics else 0.0,
             custom=metrics.get("custom", 0.0) if metrics else 0.0,
         )
+        existing_records = self.get_records()
+        parent_hash = b"\x00" * 32
+        if existing_records:
+            prev = existing_records[-1]
+            parent_hash = compute_parent_hash(prev.data, prev.name, prev.target)
+
         rec = AppendixRecord(
             entry_type=AppendixEntryType.LORA_ADAPTER,
             name=name,
@@ -260,6 +273,7 @@ class AppendixManager:
             data=adapter_bytes,
             target=target,
             metrics=m,
+            parent_hash=parent_hash,
         )
         append_record(self.file_path, rec)
 

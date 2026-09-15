@@ -150,6 +150,26 @@ class HKQuantizedLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        # LoRA adapter slots
+        self.has_lora = False
+        self.lora_r = 0
+        self.lora_alpha = 1.0
+        self.lora_scaling = 1.0
+        self.lora_A = None
+        self.lora_B = None
+
+    def attach_lora(self, r: int = 8, alpha: float = 16.0):
+        self.has_lora = True
+        self.lora_r = r
+        self.lora_alpha = alpha
+        self.lora_scaling = alpha / r
+        if self.bias is not None:
+            self.bias.requires_grad = False
+
+        self.lora_A = nn.Parameter(torch.empty(r, self.in_features, dtype=torch.float32))
+        self.lora_B = nn.Parameter(torch.zeros(self.out_features, r, dtype=torch.float32))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+
     @classmethod
     def from_float(
         cls,
@@ -206,6 +226,13 @@ class HKQuantizedLinear(nn.Module):
             raise NotImplementedError(f"Dequantize not supported for {self.storage_type}")
         return torch.stack(rows, dim=0)
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Compatibility property returning dequantized base weight (frozen / no gradient)."""
+        w = self.dequantize_weight()
+        w.requires_grad = False
+        return w
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         orig_shape = x.shape
         in_dim = orig_shape[-1]
@@ -214,7 +241,7 @@ class HKQuantizedLinear(nn.Module):
         raw_bytes = bytes(self.packed_weight.cpu().numpy())
         bias_np = self.bias.detach().cpu().numpy() if self.bias is not None else None
 
-        # Fast 1D / single-vector SIMD GEMV path without full dequantization
+        # Fast 1D / single-vector SIMD GEMV path without full dequantization (eval only)
         x_flat = x.view(-1, self.in_features)
         batch_size = x_flat.shape[0]
 
@@ -225,7 +252,7 @@ class HKQuantizedLinear(nn.Module):
             is_native_available,
         )
 
-        if is_native_available() and x.device.type == "cpu":
+        if is_native_available() and x.device.type == "cpu" and not self.training:
             out_rows = []
             for b in range(batch_size):
                 x_vec = x_flat[b].detach().cpu().to(torch.float32).numpy()
@@ -240,12 +267,21 @@ class HKQuantizedLinear(nn.Module):
                 out_rows.append(torch.from_numpy(y))
 
             if len(out_rows) == batch_size:
-                out = torch.stack(out_rows, dim=0)
-                return out.view(*orig_shape[:-1], self.out_features).to(dtype=x.dtype, device=x.device)
+                out = torch.stack(out_rows, dim=0).view(*orig_shape[:-1], self.out_features).to(dtype=x.dtype, device=x.device)
+                if self.has_lora and self.lora_A is not None and self.lora_B is not None:
+                    x_f32 = x.to(torch.float32)
+                    lora_out = (x_f32 @ self.lora_A.t()) @ self.lora_B.t() * self.lora_scaling
+                    out = out + lora_out.to(dtype=out.dtype)
+                return out
 
-        # Fallback path using dequantized weights
+        # Path using dequantized weights (supports backprop through LoRA adapters)
         w = self.dequantize_weight().to(dtype=x.dtype, device=x.device)
-        return F.linear(x, w, self.bias)
+        out = F.linear(x, w, self.bias)
+        if self.has_lora and self.lora_A is not None and self.lora_B is not None:
+            x_f32 = x.to(torch.float32)
+            lora_out = (x_f32 @ self.lora_A.t()) @ self.lora_B.t() * self.lora_scaling
+            out = out + lora_out.to(dtype=out.dtype)
+        return out
 
 
 class HKTransformerBlock(nn.Module):
@@ -425,14 +461,36 @@ class HKPreTrainedModel(nn.Module):
         )
         return str(output_path)
 
-    def enable_qlora(self, rank: int = 8, alpha: float = 16.0, target_modules: Optional[List[str]] = None):
-        """Freezes base weights and attaches LoRA adapters for fine-tuning."""
+    def enable_qlora(
+        self,
+        rank: int = 8,
+        alpha: float = 16.0,
+        target_modules: Optional[List[str]] = None,
+        storage_type: StorageType = StorageType.Q4_0,
+    ):
+        """
+        True QLoRA: Quantizes base weights into 4-bit packed buffers (reducing base weight memory/gradients)
+        and attaches low-rank trainable adapters (lora_A, lora_B).
+        """
         for p in self.parameters():
             p.requires_grad = False
-        for name, module in self.named_modules():
-            if isinstance(module, HKLinear):
-                if target_modules is None or any(t in name for t in target_modules):
-                    module.attach_lora(r=rank, alpha=alpha)
+
+        def replace_with_qlora(parent_module: nn.Module, prefix: str = ""):
+            for child_name, child in list(parent_module.named_children()):
+                full_name = f"{prefix}.{child_name}" if prefix else child_name
+                is_target = target_modules is None or any(t in full_name for t in target_modules)
+                if isinstance(child, HKQuantizedLinear):
+                    if is_target:
+                        child.attach_lora(r=rank, alpha=alpha)
+                elif isinstance(child, (HKLinear, nn.Linear)):
+                    if is_target:
+                        qlin = HKQuantizedLinear.from_float(child, storage_type=storage_type)
+                        qlin.attach_lora(r=rank, alpha=alpha)
+                        setattr(parent_module, child_name, qlin)
+                else:
+                    replace_with_qlora(child, full_name)
+
+        replace_with_qlora(self)
 
 
 class HKForCausalLM(HKPreTrainedModel):

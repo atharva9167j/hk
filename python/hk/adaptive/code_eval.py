@@ -9,6 +9,7 @@ import sys
 import ast
 import json
 import time
+import shutil
 import tempfile
 import subprocess
 from dataclasses import dataclass, asdict
@@ -44,10 +45,41 @@ class EvalResult:
         return cls(**d)
 
 class CodeSandbox:
-    """Isolated subprocess execution sandbox with timeouts and resource ceilings."""
-    def __init__(self, timeout_sec: float = 3.0, python_executable: Optional[str] = None):
+    """
+    Isolated execution sandbox with Docker container isolation, timeouts, and resource ceilings.
+    When Docker is available, executes arbitrary model-generated Python code inside an ephemeral,
+    unprivileged container with network isolation (--network none) and strict memory/CPU caps.
+    """
+    def __init__(
+        self,
+        timeout_sec: float = 3.0,
+        python_executable: Optional[str] = None,
+        use_docker: bool = True,
+        docker_image: str = "python:3.10-slim",
+        memory_limit: str = "256m",
+        cpu_limit: float = 1.0,
+    ):
         self.timeout_sec = timeout_sec
         self.python_exe = python_executable or sys.executable
+        self.use_docker = use_docker
+        self.docker_image = docker_image
+        self.memory_limit = memory_limit
+        self.cpu_limit = cpu_limit
+        self._docker_available = self._detect_docker() if self.use_docker else False
+
+    def _detect_docker(self) -> bool:
+        docker_path = shutil.which("docker")
+        if not docker_path:
+            return False
+        try:
+            res = subprocess.run([docker_path, "--version"], capture_output=True, timeout=1.5)
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    @property
+    def is_docker_active(self) -> bool:
+        return self.use_docker and self._docker_available
 
     def check_syntax(self, code_str: str) -> Tuple[bool, str]:
         """Validates Python syntax using AST parser."""
@@ -63,7 +95,7 @@ class CodeSandbox:
         test_cases: Optional[List[TestCase]] = None
     ) -> EvalResult:
         """
-        Executes code against optional unit test cases in a sandboxed child process.
+        Executes code against optional unit test cases in a sandboxed child process or Docker container.
         Measures elapsed time, captures stdout/stderr, and returns structured results.
         """
         # 1. Syntax check
@@ -99,42 +131,77 @@ except Exception as _e:
 
         full_script = "\n".join(harness_code)
 
-        # 3. Execute in temporary script file
+        # 3. Execute in Docker container or fallback subprocess
         start_t = time.perf_counter()
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
-            tmp.write(full_script)
-            tmp_path = tmp.name
+        is_running_in_docker = self.use_docker and self._docker_available
 
-        try:
-            proc = subprocess.run(
-                [self.python_exe, tmp_path],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_sec
-            )
-            elapsed_ms = (time.perf_counter() - start_t) * 1000.0
-            stdout = proc.stdout
-            stderr = proc.stderr
-            return_code = proc.returncode
+        if is_running_in_docker:
+            cmd = [
+                "docker", "run", "--rm", "-i",
+                "--network", "none",
+                "--memory", self.memory_limit,
+                f"--cpus={self.cpu_limit}",
+                self.docker_image,
+                "python", "-"
+            ]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=full_script,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_sec,
+                )
+                elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+                stdout = proc.stdout
+                stderr = proc.stderr
+                return_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                elapsed_ms = self.timeout_sec * 1000.0
+                return EvalResult(
+                    success=False,
+                    pass_rate=0.0,
+                    total_tests=len(test_cases) if test_cases else 0,
+                    passed_tests=0,
+                    execution_time_ms=elapsed_ms,
+                    syntax_valid=True,
+                    error_message=f"Execution timed out after {self.timeout_sec:.1f}s in Docker sandbox",
+                    test_details=[]
+                )
+        else:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
+                tmp.write(full_script)
+                tmp_path = tmp.name
 
-        except subprocess.TimeoutExpired:
-            elapsed_ms = self.timeout_sec * 1000.0
-            return EvalResult(
-                success=False,
-                pass_rate=0.0,
-                total_tests=len(test_cases) if test_cases else 0,
-                passed_tests=0,
-                execution_time_ms=elapsed_ms,
-                syntax_valid=True,
-                error_message=f"Execution timed out after {self.timeout_sec:.1f}s",
-                test_details=[]
-            )
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+            try:
+                proc = subprocess.run(
+                    [self.python_exe, tmp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_sec
+                )
+                elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+                stdout = proc.stdout
+                stderr = proc.stderr
+                return_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                elapsed_ms = self.timeout_sec * 1000.0
+                return EvalResult(
+                    success=False,
+                    pass_rate=0.0,
+                    total_tests=len(test_cases) if test_cases else 0,
+                    passed_tests=0,
+                    execution_time_ms=elapsed_ms,
+                    syntax_valid=True,
+                    error_message=f"Execution timed out after {self.timeout_sec:.1f}s",
+                    test_details=[]
+                )
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
 
         # 4. Parse results
         if not test_cases:

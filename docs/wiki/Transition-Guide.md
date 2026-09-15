@@ -143,7 +143,7 @@ from hk.trainer import HKTrainer, HKTrainingArguments
 
 # 1. Load model
 config = HKConfig.from_pretrained("model.hk")
-model = HKForCausalLM(config)
+model = HKForCausalLM.from_pretrained("model.hk", config=config)
 
 # 2. Configure training
 args = HKTrainingArguments(

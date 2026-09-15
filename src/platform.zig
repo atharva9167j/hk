@@ -383,3 +383,50 @@ pub fn writeBytesAtOffset(path: []const u8, data: []const u8, offset: u64, alloc
     }
 }
 
+/// Truncates a file to the specified size in-place (O(1) filesystem metadata update)
+pub fn truncateFile(path: []const u8, new_size: u64, allocator: std.mem.Allocator) !void {
+    if (@import("builtin").os.tag == .windows) {
+        const win = struct {
+            extern "kernel32" fn CreateFileA(
+                lpFileName: [*:0]const u8,
+                dwDesiredAccess: u32,
+                dwShareMode: u32,
+                lpSecurityAttributes: ?*anyopaque,
+                dwCreationDisposition: u32,
+                dwFlagsAndAttributes: u32,
+                hTemplateFile: ?*anyopaque,
+            ) callconv(.winapi) std.os.windows.HANDLE;
+
+            extern "kernel32" fn SetFilePointer(
+                hFile: std.os.windows.HANDLE,
+                lDistanceToMove: i32,
+                lpDistanceToMoveHigh: ?*i32,
+                dwMoveMethod: u32,
+            ) callconv(.winapi) u32;
+
+            extern "kernel32" fn SetEndOfFile(hFile: std.os.windows.HANDLE) callconv(.winapi) i32;
+            extern "kernel32" fn CloseHandle(hObject: std.os.windows.HANDLE) callconv(.winapi) i32;
+        };
+
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+
+        const handle = win.CreateFileA(path_z.ptr, 0x40000000 | 0x80000000, 1 | 2, null, 3, 0x80, null);
+        if (handle == std.os.windows.INVALID_HANDLE_VALUE) return error.FileNotFound;
+        defer _ = win.CloseHandle(handle);
+
+        var high: i32 = @intCast((new_size >> 32) & 0xFFFFFFFF);
+        const low: i32 = @intCast(new_size & 0xFFFFFFFF);
+        _ = win.SetFilePointer(handle, low, &high, 0);
+        if (win.SetEndOfFile(handle) == 0) return error.WriteFailed;
+    } else {
+        const io = std.Options.debug_io;
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.openFile(io, path, .{ .mode = .read_write });
+        defer file.close(io);
+        if (@hasDecl(std.posix, "ftruncate")) {
+            try std.posix.ftruncate(file.handle, new_size);
+        }
+    }
+}
+

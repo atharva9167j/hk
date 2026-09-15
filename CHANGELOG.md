@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.2] - 2026-09-16 - Training Robustness, True QLoRA & Cryptographic Lineage Hardening
+
+### Added & Enhanced
+- **Training Arguments & Optimizer Controls**:
+  - Added native `gradient_accumulation_steps: int = 1`, `max_grad_norm: float = 1.0`, and `protect_base_capacity: bool = False` to `HKTrainingArguments`.
+  - Implemented gradient accumulation loss scaling and `torch.nn.utils.clip_grad_norm_` gradient clipping inside `HKTrainer.train()`.
+  - Changed `enable_adaptive_growth` default to `False` to prevent unexpected dynamic layer widening unless explicitly opted-in.
+  - Automatically hooks `model.enable_continual_learning(protect_base=True)` upon trainer initialization when `protect_base_capacity` is set.
+- **Cryptographic Version Chaining & Lineage Verification**:
+  - Upgraded `verifyLineage` in native Zig (`src/appendix.zig`) and `verify_lineage` in Python (`hk.adaptive.appendix`) to cryptographically hash the complete record (`name` + `target` + `payload`) with SHA-256 rather than only payload data.
+  - Enforced strict hash verification across all subsequent generations, disallowing all-zero hash bypasses.
+  - Automatically chains parent hashes across incremental LoRA checkpoints in `AppendixManager`.
+- **True QLoRA Quantized Base Adaptation**:
+  - `enable_qlora` attaches trainable low-rank adapters directly to 4-bit packed `HKQuantizedLinear` modules with backpropagation support.
+- **Sandboxed Execution & In-Place Truncation**:
+  - Docker container sandboxing with `--network none`, CPU, and memory limits in `CodeSandbox`.
+  - In-place $O(1)$ file truncation using native OS handles (`SetEndOfFile` on Windows, `ftruncate` on POSIX).
+- **Documentation & Weight Loading Parity**:
+  - Corrected documentation and transition guides to use `HKForCausalLM.from_pretrained("model.hk", config=config)` for fine-tuning workflows to guarantee pretrained weights are loaded.
+
+---
+
 ## [1.0.1] - 2026-09-15 - Documentation Overhaul & CI Reliability
 
 ### Fixed & Enhanced

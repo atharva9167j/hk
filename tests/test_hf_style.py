@@ -346,6 +346,139 @@ def test_causal_lm_sampling_and_generation():
     assert generated.shape == (1, 14), f"Expected shape (1, 14), got {generated.shape}"
 
 
+def test_async_eval_and_optimizer_preservation(temp_dir):
+    """Verifies async evaluation loop, real metrics computation, and adapter serialization in appendix."""
+    cfg = HKConfig(
+        model_type="causal_lm",
+        vocab_size=100,
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=64,
+    )
+    model = HKForCausalLM(cfg)
+
+    class DummyDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 8
+        def __getitem__(self, idx):
+            x = torch.randint(0, 100, (16,))
+            return {"input_ids": x, "labels": x}
+
+    eval_ds = DummyDataset()
+    train_ds = DummyDataset()
+
+    args = HKTrainingArguments(
+        output_dir=temp_dir,
+        learning_rate=1e-3,
+        num_train_epochs=1,
+        logging_steps=1,
+        enable_adaptive_growth=True,
+        growth_patience=1,
+        growth_width_factor=1.5,
+    )
+
+    trainer = HKTrainer(
+        model=model,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+    )
+
+    res = trainer.train()
+    assert res["global_step"] > 0
+    assert "eval_metrics" in res
+    assert "accuracy" in res["eval_metrics"]
+
+    # Verify adapter payload is real serialized state dict, not placeholder
+    from hk.adaptive.appendix import AppendixManager
+    import io
+    mgr = AppendixManager(res["output_path"])
+    records = mgr.get_records()
+    assert len(records) >= 1
+    payload = records[0].data
+    assert payload != b"HK_ADAPTER_SYNC"
+    buf = io.BytesIO(payload)
+    loaded_state = torch.load(buf, weights_only=False)
+    assert isinstance(loaded_state, dict)
+
+
+def test_training_arguments_and_lineage_verification(temp_dir):
+    """Verifies that new training arguments work and in-container cryptographic lineage functions properly."""
+    cfg = HKConfig(
+        model_type="causal_lm",
+        vocab_size=100,
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=64,
+    )
+    model = HKForCausalLM(cfg)
+
+    # Test default of enable_adaptive_growth is now False
+    args_default = HKTrainingArguments()
+    assert args_default.enable_adaptive_growth is False
+    assert args_default.gradient_accumulation_steps == 1
+    assert args_default.max_grad_norm == 1.0
+    assert args_default.protect_base_capacity is False
+
+    # Test training with gradient accumulation, clipping, and plasticity protection
+    args = HKTrainingArguments(
+        output_dir=temp_dir,
+        learning_rate=1e-3,
+        num_train_epochs=1,
+        logging_steps=1,
+        gradient_accumulation_steps=2,
+        max_grad_norm=0.5,
+        protect_base_capacity=True,
+    )
+
+    class SmallDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 4
+        def __getitem__(self, idx):
+            x = torch.randint(0, 100, (8,))
+            return {"input_ids": x, "labels": x}
+
+    trainer = HKTrainer(
+        model=model,
+        args=args,
+        train_dataset=SmallDataset(),
+    )
+    res = trainer.train()
+    assert res["global_step"] > 0
+
+    # Test Appendix cryptographic lineage verification
+    from hk.adaptive.appendix import AppendixManager, AppendixRecord, AppendixEntryType, append_record, compute_parent_hash
+    mgr = AppendixManager(res["output_path"])
+    records = mgr.get_records()
+    assert len(records) >= 1
+    assert mgr.verify() is True
+
+    # Append a second record with valid hash chaining
+    parent_hash = compute_parent_hash(records[-1].data, records[-1].name, records[-1].target)
+    rec2 = AppendixRecord(
+        entry_type=AppendixEntryType.LORA_ADAPTER,
+        name="test.step2",
+        generation=2,
+        data=b"test_payload_gen2",
+        parent_hash=parent_hash,
+    )
+    append_record(res["output_path"], rec2)
+    assert mgr.verify() is True
+
+    # Tamper with record hash to verify detection
+    rec3_tampered = AppendixRecord(
+        entry_type=AppendixEntryType.LORA_ADAPTER,
+        name="test.step3",
+        generation=3,
+        data=b"test_payload_gen3",
+        parent_hash=b"bad_hash_value" + b"\x00" * 18,
+    )
+    append_record(res["output_path"], rec3_tampered)
+    assert mgr.verify() is False
+
+
 if __name__ == "__main__":
     import inspect
     print("=" * 60)
