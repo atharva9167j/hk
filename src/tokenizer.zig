@@ -283,18 +283,45 @@ fn parseStringSequence(allocator: std.mem.Allocator, raw: []const u8) !std.Array
             return;
         }
 
+        const uses_gpt2_space = self.token_to_id.contains("\xc4\xa0");
+        const uses_spm_space = self.token_to_id.contains("\xe2\x96\x81");
+
+        // Pretokenize spaces/newlines if model vocabulary uses byte-level BPE
+        var mapped_text_buf: std.ArrayList(u8) = .empty;
+        defer mapped_text_buf.deinit(self.allocator);
+
+        if (uses_gpt2_space or uses_spm_space) {
+            for (text) |b| {
+                if (b == ' ') {
+                    if (uses_gpt2_space) {
+                        try mapped_text_buf.appendSlice(self.allocator, "\xc4\xa0");
+                    } else {
+                        try mapped_text_buf.appendSlice(self.allocator, "\xe2\x96\x81");
+                    }
+                } else if (b == '\n' and uses_gpt2_space) {
+                    try mapped_text_buf.appendSlice(self.allocator, "\xc4\x8a");
+                } else if (b == '\t' and uses_gpt2_space) {
+                    try mapped_text_buf.appendSlice(self.allocator, "\xc4\x89");
+                } else {
+                    try mapped_text_buf.append(self.allocator, b);
+                }
+            }
+        }
+
+        const src = if (uses_gpt2_space or uses_spm_space) mapped_text_buf.items else text;
+
         // Initial tokenization: maximal prefix or byte fallback
         var temp_ids: std.ArrayList(u32) = .empty;
         defer temp_ids.deinit(self.allocator);
 
         var i: usize = 0;
-        while (i < text.len) {
+        while (i < src.len) {
             var matched: bool = false;
             // Try longest matching prefix up to 32 bytes
-            const max_sub_len = @min(text.len - i, 32);
+            const max_sub_len = @min(src.len - i, 32);
             var len = max_sub_len;
             while (len > 0) : (len -= 1) {
-                const sub = text[i .. i + len];
+                const sub = src[i .. i + len];
                 if (self.token_to_id.get(sub)) |tid| {
                     try temp_ids.append(self.allocator, tid);
                     i += len;
@@ -304,7 +331,7 @@ fn parseStringSequence(allocator: std.mem.Allocator, raw: []const u8) !std.Array
             }
 
             if (!matched) {
-                const b = text[i];
+                const b = src[i];
                 const tid = self.byte_pieces[b] orelse (self.unk_id orelse 0);
                 try temp_ids.append(self.allocator, tid);
                 i += 1;
@@ -385,7 +412,27 @@ fn parseStringSequence(allocator: std.mem.Allocator, raw: []const u8) !std.Array
                 } else |_| {}
             }
 
-            try out_text.appendSlice(self.allocator, entry.text);
+            // Map byte-level BPE spaces and newlines back to standard characters
+            var j: usize = 0;
+            const entry_text = entry.text;
+            while (j < entry_text.len) {
+                if (entry_text.len >= j + 2 and entry_text[j] == 0xc4 and entry_text[j + 1] == 0xa0) {
+                    try out_text.append(self.allocator, ' ');
+                    j += 2;
+                } else if (entry_text.len >= j + 2 and entry_text[j] == 0xc4 and entry_text[j + 1] == 0x8a) {
+                    try out_text.append(self.allocator, '\n');
+                    j += 2;
+                } else if (entry_text.len >= j + 2 and entry_text[j] == 0xc4 and entry_text[j + 1] == 0x89) {
+                    try out_text.append(self.allocator, '\t');
+                    j += 2;
+                } else if (entry_text.len >= j + 3 and entry_text[j] == 0xe2 and entry_text[j + 1] == 0x96 and entry_text[j + 2] == 0x81) {
+                    try out_text.append(self.allocator, ' ');
+                    j += 3;
+                } else {
+                    try out_text.append(self.allocator, entry_text[j]);
+                    j += 1;
+                }
+            }
         }
     }
 
