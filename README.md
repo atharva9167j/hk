@@ -138,11 +138,17 @@ npm install hknt
 Or compile from source using Zig:
 
 ```bash
-# Build native release artifacts (hk.exe / hk.dll / libhk.so)
+# Build native release artifacts (CPU SIMD engine)
 zig build -Doptimize=ReleaseFast
+
+# Build with CUDA GPU backend (requires nvcc + CUDA toolkit)
+zig build -Dcuda=true -Doptimize=ReleaseFast
 
 # Run native test suite (42/42 native tests passing)
 zig build test
+
+# Run CUDA GPU backend correctness tests (requires -Dcuda=true)
+zig build test-cuda -Dcuda=true
 ```
 
 ---
@@ -356,6 +362,17 @@ hk export -f gguf model.hk exported.gguf
 
 # 10. Launch visual HK Model Studio GUI
 hk gui model.hk
+# Or via Python:
+hk-gui model.hk
+
+# 11. Native autoregressive inference with dynamic CPU/GPU offloading (-ngl <layers>)
+hk run model.hk -p "Explain quantum computing simply" -n 128 -ngl 32
+
+# 12. Interactive terminal chat REPL with dynamic offloading
+hk chat model.hk -ngl 16 --temp 0.7
+
+# 13. Cryptographic hash verification (streaming SHA-256)
+hk hash model.hk
 ```
 
 ---

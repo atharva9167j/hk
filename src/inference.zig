@@ -4,6 +4,7 @@ const reader_mod = @import("reader.zig");
 const metadata_mod = @import("metadata.zig");
 const tensor_ops = @import("tensor_ops.zig");
 const quantization = @import("quantization.zig");
+const cuda = @import("cuda.zig");
 
 pub const ModelConfig = struct {
     dim: usize = 512,
@@ -36,6 +37,22 @@ pub const LayerWeights = struct {
     w_up: TensorRef,
     w_down: TensorRef,
     owns_norms: bool = false,
+    attn_q_norm: ?[]const f32 = null,
+    attn_k_norm: ?[]const f32 = null,
+
+    // GPU offload handles (populated when offloaded to device):
+    gpu_wq: ?cuda.DeviceBuffer = null,
+    gpu_wk: ?cuda.DeviceBuffer = null,
+    gpu_wv: ?cuda.DeviceBuffer = null,
+    gpu_wo: ?cuda.DeviceBuffer = null,
+    gpu_w_gate: ?cuda.DeviceBuffer = null,
+    gpu_w_up: ?cuda.DeviceBuffer = null,
+    gpu_w_down: ?cuda.DeviceBuffer = null,
+    gpu_attn_norm: ?cuda.DeviceBuffer = null,
+    gpu_ffn_norm: ?cuda.DeviceBuffer = null,
+    gpu_attn_q_norm: ?cuda.DeviceBuffer = null,
+    gpu_attn_k_norm: ?cuda.DeviceBuffer = null,
+    is_gpu: bool = false,
 };
 
 pub const KVCache = struct {
@@ -89,6 +106,10 @@ pub const KVCache = struct {
     }
 };
 
+pub const EngineOptions = struct {
+    gpu_layers: ?usize = null, // null = auto (full offload if CUDA available, else 0)
+};
+
 pub const TransformerEngine = struct {
     allocator: std.mem.Allocator,
     config: ModelConfig,
@@ -99,7 +120,24 @@ pub const TransformerEngine = struct {
     lm_head: TensorRef,
     cache: KVCache,
 
-    // Scratch working buffers
+    // Dynamic offloading controls
+    n_gpu_layers: usize = 0,
+
+    // Device scratch buffers (allocated if n_gpu_layers > 0 and CUDA is available)
+    d_x: ?cuda.DeviceBuffer = null,
+    d_xb: ?cuda.DeviceBuffer = null,
+    d_q: ?cuda.DeviceBuffer = null,
+    d_k: ?cuda.DeviceBuffer = null,
+    d_v: ?cuda.DeviceBuffer = null,
+    d_gate: ?cuda.DeviceBuffer = null,
+    d_up: ?cuda.DeviceBuffer = null,
+    d_out: ?cuda.DeviceBuffer = null,
+    d_key_cache: ?cuda.DeviceBuffer = null,
+    d_val_cache: ?cuda.DeviceBuffer = null,
+    gpu_output_norm: ?cuda.DeviceBuffer = null,
+    gpu_lm_head: ?cuda.DeviceBuffer = null,
+
+    // Host scratch working buffers
     x: []f32,
     xb: []f32,
     q: []f32,
@@ -142,6 +180,19 @@ pub const TransformerEngine = struct {
             .output_norm = output_norm,
             .lm_head = lm_head,
             .cache = cache,
+            .n_gpu_layers = 0,
+            .d_x = null,
+            .d_xb = null,
+            .d_q = null,
+            .d_k = null,
+            .d_v = null,
+            .d_gate = null,
+            .d_up = null,
+            .d_out = null,
+            .d_key_cache = null,
+            .d_val_cache = null,
+            .gpu_output_norm = null,
+            .gpu_lm_head = null,
             .x = x,
             .xb = xb,
             .q = q,
@@ -154,8 +205,64 @@ pub const TransformerEngine = struct {
         };
     }
 
+    fn parseNormWeights(allocator: std.mem.Allocator, norm_data: []const u8, st: format.StorageType, count: usize) ![]f32 {
+        const buf = try allocator.alloc(f32, count);
+        errdefer allocator.free(buf);
+
+        switch (st) {
+            .f32 => {
+                for (0..count) |i| {
+                    const off = i * 4;
+                    if (off + 4 <= norm_data.len) {
+                        buf[i] = @bitCast(std.mem.readInt(u32, norm_data[off .. off + 4][0..4], .little));
+                    } else {
+                        buf[i] = 1.0;
+                    }
+                }
+            },
+            .bf16 => {
+                for (0..count) |i| {
+                    const off = i * 2;
+                    if (off + 2 <= norm_data.len) {
+                        const raw = std.mem.readInt(u16, norm_data[off .. off + 2][0..2], .little);
+                        buf[i] = @bitCast(@as(u32, raw) << 16);
+                    } else {
+                        buf[i] = 1.0;
+                    }
+                }
+            },
+            .f16 => {
+                for (0..count) |i| {
+                    const off = i * 2;
+                    if (off + 2 <= norm_data.len) {
+                        const raw = std.mem.readInt(u16, norm_data[off .. off + 2][0..2], .little);
+                        buf[i] = @floatCast(@as(f16, @bitCast(raw)));
+                    } else {
+                        buf[i] = 1.0;
+                    }
+                }
+            },
+            else => {
+                for (0..count) |i| {
+                    const off = i * 4;
+                    if (off + 4 <= norm_data.len) {
+                        buf[i] = @bitCast(std.mem.readInt(u32, norm_data[off .. off + 4][0..4], .little));
+                    } else {
+                        buf[i] = 1.0;
+                    }
+                }
+            },
+        }
+        return buf;
+    }
+
     /// Constructs and initializes a TransformerEngine from an open HKReader
     pub fn initFromReader(allocator: std.mem.Allocator, reader: *reader_mod.HKReader) !*TransformerEngine {
+        return initFromReaderWithOptions(allocator, reader, .{});
+    }
+
+    /// Constructs and initializes a TransformerEngine with custom offloading options
+    pub fn initFromReaderWithOptions(allocator: std.mem.Allocator, reader: *reader_mod.HKReader, options: EngineOptions) !*TransformerEngine {
         var cfg = ModelConfig{};
 
         if (reader.metadata_map.findInt(metadata_mod.StandardKeys.ATTN_HEAD_COUNT) orelse reader.metadata_map.findInt("head_count")) |v| {
@@ -179,10 +286,13 @@ pub const TransformerEngine = struct {
         // Find token_embd.weight
         const emb_entry = reader.toc.find("token_embd.weight") orelse
             reader.toc.find("model.embed_tokens.weight") orelse
+            reader.toc.find("language_model.model.embed_tokens.weight") orelse
+            reader.toc.find("mtp.pre_fc_norm_embedding.weight") orelse
+            reader.toc.find("mtp.fc.weight") orelse
             return error.MissingEmbeddingTensor;
 
         cfg.vocab_size = @intCast(emb_entry.shape[0]);
-        cfg.dim = @intCast(emb_entry.shape[1]);
+        cfg.dim = if (emb_entry.shape.len > 1 and emb_entry.shape[1] > 0) @intCast(emb_entry.shape[1]) else @intCast(emb_entry.shape[0]);
 
         if (reader.metadata_map.findInt(metadata_mod.StandardKeys.ROPE_DIMENSION_COUNT) orelse reader.metadata_map.findInt("head_dim")) |v| {
             if (v > 0) cfg.head_dim = @intCast(v);
@@ -196,7 +306,8 @@ pub const TransformerEngine = struct {
 
         // Detect or refine n_heads and n_kv_heads directly from layer 0 projection shapes if available
         const wq_0_entry = reader.toc.find("blk.0.attn_q.weight") orelse
-            reader.toc.find("model.layers.0.self_attn.q_proj.weight");
+            reader.toc.find("model.layers.0.self_attn.q_proj.weight") orelse
+            reader.toc.find("mtp.layers.0.self_attn.q_proj.weight");
         if (wq_0_entry) |wq_e| {
             const wq_rows: usize = @intCast(wq_e.shape[0]);
             if (cfg.head_dim > 0 and wq_rows > 0) {
@@ -205,7 +316,8 @@ pub const TransformerEngine = struct {
         }
 
         const wk_0_entry = reader.toc.find("blk.0.attn_k.weight") orelse
-            reader.toc.find("model.layers.0.self_attn.k_proj.weight");
+            reader.toc.find("model.layers.0.self_attn.k_proj.weight") orelse
+            reader.toc.find("mtp.layers.0.self_attn.k_proj.weight");
         if (wk_0_entry) |wk_e| {
             const wk_rows: usize = @intCast(wk_e.shape[0]);
             if (cfg.head_dim > 0 and wk_rows > 0) {
@@ -221,25 +333,20 @@ pub const TransformerEngine = struct {
             .cols = cfg.dim,
         };
 
-        // Find output_norm.weight - safely copy to owned aligned buffer
+        // Find output_norm.weight
         const norm_entry = reader.toc.find("output_norm.weight") orelse
             reader.toc.find("model.norm.weight") orelse
+            reader.toc.find("language_model.model.norm.weight") orelse
+            reader.toc.find("mtp.norm.weight") orelse
             return error.MissingOutputNormTensor;
         const norm_data = try reader.getTensorData(norm_entry);
-        const output_norm_buf = try allocator.alloc(f32, cfg.dim);
+        const output_norm_buf = try parseNormWeights(allocator, norm_data, norm_entry.storage_type, cfg.dim);
         errdefer allocator.free(output_norm_buf);
-        for (0..cfg.dim) |i| {
-            const off = i * 4;
-            if (off + 4 <= norm_data.len) {
-                output_norm_buf[i] = @bitCast(std.mem.readInt(u32, norm_data[off .. off + 4][0..4], .little));
-            } else {
-                output_norm_buf[i] = 1.0;
-            }
-        }
 
         // Find lm_head / output.weight
         const head_entry_opt = reader.toc.find("output.weight") orelse
-            reader.toc.find("lm_head.weight");
+            reader.toc.find("lm_head.weight") orelse
+            reader.toc.find("mtp.fc.weight");
         const lm_head = if (head_entry_opt) |h_entry| blk: {
             const h_data = try reader.getTensorData(h_entry);
             break :blk TensorRef{
@@ -250,22 +357,26 @@ pub const TransformerEngine = struct {
             };
         } else tok_embeddings;
 
-        // Detect number of layers by checking blk.0, blk.1, ...
+        // Detect number of layers
         var layer_count: usize = 0;
         var name_buf: [64]u8 = undefined;
         while (true) : (layer_count += 1) {
             const test_name = std.fmt.bufPrint(&name_buf, "blk.{}.attn_q.weight", .{layer_count}) catch break;
             if (reader.toc.find(test_name) == null) {
                 const alt_name = std.fmt.bufPrint(&name_buf, "model.layers.{}.self_attn.q_proj.weight", .{layer_count}) catch break;
-                if (reader.toc.find(alt_name) == null) break;
+                if (reader.toc.find(alt_name) == null) {
+                    const mtp_name = std.fmt.bufPrint(&name_buf, "mtp.layers.{}.self_attn.q_proj.weight", .{layer_count}) catch break;
+                    if (reader.toc.find(mtp_name) == null) break;
+                }
             }
         }
         if (layer_count == 0) return error.NoLayersFound;
         cfg.n_layers = layer_count;
 
-        // Determine intermediate dimension from blk.0.ffn_gate.weight
+        // Intermediate dimension from blk.0.ffn_gate.weight
         const gate_0_entry = reader.toc.find("blk.0.ffn_gate.weight") orelse
             reader.toc.find("model.layers.0.mlp.gate_proj.weight") orelse
+            reader.toc.find("mtp.layers.0.mlp.gate_proj.weight") orelse
             return error.MissingFFNGateTensor;
         cfg.hidden_dim = @intCast(gate_0_entry.shape[0]);
 
@@ -275,6 +386,11 @@ pub const TransformerEngine = struct {
         engine.* = try TransformerEngine.init(allocator, cfg, tok_embeddings, output_norm_buf, lm_head);
         engine.owns_output_norm = true;
         errdefer engine.deinit();
+
+        // Determine number of GPU layers to offload
+        const target_gpu_layers = options.gpu_layers orelse (if (cuda.isAvailable()) cfg.n_layers else 0);
+        const n_gpu = @min(target_gpu_layers, cfg.n_layers);
+        engine.n_gpu_layers = n_gpu;
 
         for (0..cfg.n_layers) |l| {
             var buf1: [64]u8 = undefined;
@@ -297,53 +413,156 @@ pub const TransformerEngine = struct {
             const wup_name = std.fmt.bufPrint(&buf8, "blk.{}.ffn_up.weight", .{l}) catch return error.NameTooLong;
             const wdown_name = std.fmt.bufPrint(&buf9, "blk.{}.ffn_down.weight", .{l}) catch return error.NameTooLong;
 
-            const attn_norm_e = reader.toc.find(attn_norm_name) orelse return error.MissingLayerTensor;
-            const wq_e = reader.toc.find(wq_name) orelse return error.MissingLayerTensor;
-            const wk_e = reader.toc.find(wk_name) orelse return error.MissingLayerTensor;
-            const wv_e = reader.toc.find(wv_name) orelse return error.MissingLayerTensor;
-            const wo_e = reader.toc.find(wo_name) orelse return error.MissingLayerTensor;
-            const ffn_norm_e = reader.toc.find(ffn_norm_name) orelse return error.MissingLayerTensor;
-            const wgate_e = reader.toc.find(wgate_name) orelse return error.MissingLayerTensor;
-            const wup_e = reader.toc.find(wup_name) orelse return error.MissingLayerTensor;
-            const wdown_e = reader.toc.find(wdown_name) orelse return error.MissingLayerTensor;
+            const attn_norm_e = reader.toc.find(attn_norm_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf1, "model.layers.{}.input_layernorm.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf1, "mtp.layers.{}.input_layernorm.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const wq_e = reader.toc.find(wq_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf2, "model.layers.{}.self_attn.q_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf2, "mtp.layers.{}.self_attn.q_proj.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const wk_e = reader.toc.find(wk_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf3, "model.layers.{}.self_attn.k_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf3, "mtp.layers.{}.self_attn.k_proj.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const wv_e = reader.toc.find(wv_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf4, "model.layers.{}.self_attn.v_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf4, "mtp.layers.{}.self_attn.v_proj.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const wo_e = reader.toc.find(wo_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf5, "model.layers.{}.self_attn.o_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf5, "mtp.layers.{}.self_attn.o_proj.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const ffn_norm_e = reader.toc.find(ffn_norm_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf6, "model.layers.{}.post_attention_layernorm.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf6, "mtp.layers.{}.post_attention_layernorm.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const wgate_e = reader.toc.find(wgate_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf7, "model.layers.{}.mlp.gate_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf7, "mtp.layers.{}.mlp.gate_proj.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const wup_e = reader.toc.find(wup_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf8, "model.layers.{}.mlp.up_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf8, "mtp.layers.{}.mlp.up_proj.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
+            const wdown_e = reader.toc.find(wdown_name) orelse
+                reader.toc.find(std.fmt.bufPrint(&buf9, "model.layers.{}.mlp.down_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf9, "mtp.layers.{}.mlp.down_proj.weight", .{l}) catch "") orelse
+                return error.MissingLayerTensor;
 
             const attn_norm_data = try reader.getTensorData(attn_norm_e);
             const ffn_norm_data = try reader.getTensorData(ffn_norm_e);
 
-            const a_norm_buf = try allocator.alloc(f32, cfg.dim);
+            const a_norm_buf = try parseNormWeights(allocator, attn_norm_data, attn_norm_e.storage_type, cfg.dim);
             errdefer allocator.free(a_norm_buf);
-            for (0..cfg.dim) |i| {
-                const off = i * 4;
-                if (off + 4 <= attn_norm_data.len) {
-                    a_norm_buf[i] = @bitCast(std.mem.readInt(u32, attn_norm_data[off .. off + 4][0..4], .little));
-                } else {
-                    a_norm_buf[i] = 1.0;
-                }
+
+            const f_norm_buf = try parseNormWeights(allocator, ffn_norm_data, ffn_norm_e.storage_type, cfg.dim);
+            errdefer allocator.free(f_norm_buf);
+
+            // QK-Norm Detection (Qwen3 / Gemma 2)
+            var buf_qn: [64]u8 = undefined;
+            var buf_kn: [64]u8 = undefined;
+            const qn_name = std.fmt.bufPrint(&buf_qn, "blk.{}.attn_q_norm.weight", .{l}) catch "";
+            const kn_name = std.fmt.bufPrint(&buf_kn, "blk.{}.attn_k_norm.weight", .{l}) catch "";
+            const qn_e = reader.toc.find(qn_name) orelse reader.toc.find(std.fmt.bufPrint(&buf_qn, "model.layers.{}.self_attn.q_norm.weight", .{l}) catch "");
+            const kn_e = reader.toc.find(kn_name) orelse reader.toc.find(std.fmt.bufPrint(&buf_kn, "model.layers.{}.self_attn.k_norm.weight", .{l}) catch "");
+
+            var qn_buf: ?[]f32 = null;
+            if (qn_e) |entry| {
+                const data = try reader.getTensorData(entry);
+                const count: usize = if (entry.shape[0] > 0) @intCast(entry.shape[0]) else cfg.head_dim;
+                qn_buf = try parseNormWeights(allocator, data, entry.storage_type, count);
             }
 
-            const f_norm_buf = try allocator.alloc(f32, cfg.dim);
-            errdefer allocator.free(f_norm_buf);
-            for (0..cfg.dim) |i| {
-                const off = i * 4;
-                if (off + 4 <= ffn_norm_data.len) {
-                    f_norm_buf[i] = @bitCast(std.mem.readInt(u32, ffn_norm_data[off .. off + 4][0..4], .little));
-                } else {
-                    f_norm_buf[i] = 1.0;
-                }
+            var kn_buf: ?[]f32 = null;
+            if (kn_e) |entry| {
+                const data = try reader.getTensorData(entry);
+                const count: usize = if (entry.shape[0] > 0) @intCast(entry.shape[0]) else cfg.head_dim;
+                kn_buf = try parseNormWeights(allocator, data, entry.storage_type, count);
+            }
+
+            const wq_data = try reader.getTensorData(wq_e);
+            const wk_data = try reader.getTensorData(wk_e);
+            const wv_data = try reader.getTensorData(wv_e);
+            const wo_data = try reader.getTensorData(wo_e);
+            const wgate_data = try reader.getTensorData(wgate_e);
+            const wup_data = try reader.getTensorData(wup_e);
+            const wdown_data = try reader.getTensorData(wdown_e);
+
+            var gpu_wq: ?cuda.DeviceBuffer = null;
+            var gpu_wk: ?cuda.DeviceBuffer = null;
+            var gpu_wv: ?cuda.DeviceBuffer = null;
+            var gpu_wo: ?cuda.DeviceBuffer = null;
+            var gpu_w_gate: ?cuda.DeviceBuffer = null;
+            var gpu_w_up: ?cuda.DeviceBuffer = null;
+            var gpu_w_down: ?cuda.DeviceBuffer = null;
+            var gpu_a_norm: ?cuda.DeviceBuffer = null;
+            var gpu_f_norm: ?cuda.DeviceBuffer = null;
+            var gpu_qn: ?cuda.DeviceBuffer = null;
+            var gpu_kn: ?cuda.DeviceBuffer = null;
+
+            if (l < n_gpu and cuda.isAvailable()) {
+                gpu_wq = cuda.DeviceBuffer.upload(wq_data) catch null;
+                gpu_wk = cuda.DeviceBuffer.upload(wk_data) catch null;
+                gpu_wv = cuda.DeviceBuffer.upload(wv_data) catch null;
+                gpu_wo = cuda.DeviceBuffer.upload(wo_data) catch null;
+                gpu_w_gate = cuda.DeviceBuffer.upload(wgate_data) catch null;
+                gpu_w_up = cuda.DeviceBuffer.upload(wup_data) catch null;
+                gpu_w_down = cuda.DeviceBuffer.upload(wdown_data) catch null;
+                gpu_a_norm = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(a_norm_buf)) catch null;
+                gpu_f_norm = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(f_norm_buf)) catch null;
+                if (qn_buf) |qn| gpu_qn = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(qn)) catch null;
+                if (kn_buf) |kn| gpu_kn = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(kn)) catch null;
             }
 
             try engine.layers.append(allocator, .{
                 .attn_norm = a_norm_buf,
-                .wq = .{ .data = try reader.getTensorData(wq_e), .storage_type = wq_e.storage_type, .rows = @intCast(wq_e.shape[0]), .cols = @intCast(wq_e.shape[1]) },
-                .wk = .{ .data = try reader.getTensorData(wk_e), .storage_type = wk_e.storage_type, .rows = @intCast(wk_e.shape[0]), .cols = @intCast(wk_e.shape[1]) },
-                .wv = .{ .data = try reader.getTensorData(wv_e), .storage_type = wv_e.storage_type, .rows = @intCast(wv_e.shape[0]), .cols = @intCast(wv_e.shape[1]) },
-                .wo = .{ .data = try reader.getTensorData(wo_e), .storage_type = wo_e.storage_type, .rows = @intCast(wo_e.shape[0]), .cols = @intCast(wo_e.shape[1]) },
+                .wq = .{ .data = wq_data, .storage_type = wq_e.storage_type, .rows = @intCast(wq_e.shape[0]), .cols = @intCast(wq_e.shape[1]) },
+                .wk = .{ .data = wk_data, .storage_type = wk_e.storage_type, .rows = @intCast(wk_e.shape[0]), .cols = @intCast(wk_e.shape[1]) },
+                .wv = .{ .data = wv_data, .storage_type = wv_e.storage_type, .rows = @intCast(wv_e.shape[0]), .cols = @intCast(wv_e.shape[1]) },
+                .wo = .{ .data = wo_data, .storage_type = wo_e.storage_type, .rows = @intCast(wo_e.shape[0]), .cols = @intCast(wo_e.shape[1]) },
                 .ffn_norm = f_norm_buf,
-                .w_gate = .{ .data = try reader.getTensorData(wgate_e), .storage_type = wgate_e.storage_type, .rows = @intCast(wgate_e.shape[0]), .cols = @intCast(wgate_e.shape[1]) },
-                .w_up = .{ .data = try reader.getTensorData(wup_e), .storage_type = wup_e.storage_type, .rows = @intCast(wup_e.shape[0]), .cols = @intCast(wup_e.shape[1]) },
-                .w_down = .{ .data = try reader.getTensorData(wdown_e), .storage_type = wdown_e.storage_type, .rows = @intCast(wdown_e.shape[0]), .cols = @intCast(wdown_e.shape[1]) },
+                .w_gate = .{ .data = wgate_data, .storage_type = wgate_e.storage_type, .rows = @intCast(wgate_e.shape[0]), .cols = @intCast(wgate_e.shape[1]) },
+                .w_up = .{ .data = wup_data, .storage_type = wup_e.storage_type, .rows = @intCast(wup_e.shape[0]), .cols = @intCast(wup_e.shape[1]) },
+                .w_down = .{ .data = wdown_data, .storage_type = wdown_e.storage_type, .rows = @intCast(wdown_e.shape[0]), .cols = @intCast(wdown_e.shape[1]) },
                 .owns_norms = true,
+                .attn_q_norm = qn_buf,
+                .attn_k_norm = kn_buf,
+                .gpu_wq = gpu_wq,
+                .gpu_wk = gpu_wk,
+                .gpu_wv = gpu_wv,
+                .gpu_wo = gpu_wo,
+                .gpu_w_gate = gpu_w_gate,
+                .gpu_w_up = gpu_w_up,
+                .gpu_w_down = gpu_w_down,
+                .gpu_attn_norm = gpu_a_norm,
+                .gpu_ffn_norm = gpu_f_norm,
+                .gpu_attn_q_norm = gpu_qn,
+                .gpu_attn_k_norm = gpu_kn,
+                .is_gpu = (gpu_wq != null),
             });
+        }
+
+        // Allocate device scratch buffers if at least one layer is offloaded
+        if (n_gpu > 0 and cuda.isAvailable()) {
+            const kv_dim = @max(cfg.n_kv_heads * cfg.head_dim, cfg.dim);
+            const max_q_dim = @max(cfg.n_heads * cfg.head_dim, cfg.dim);
+
+            engine.d_x = cuda.DeviceBuffer.allocUninit(cfg.dim * @sizeOf(f32)) catch null;
+            engine.d_xb = cuda.DeviceBuffer.allocUninit(cfg.dim * @sizeOf(f32)) catch null;
+            engine.d_q = cuda.DeviceBuffer.allocUninit(max_q_dim * @sizeOf(f32)) catch null;
+            engine.d_k = cuda.DeviceBuffer.allocUninit(kv_dim * @sizeOf(f32)) catch null;
+            engine.d_v = cuda.DeviceBuffer.allocUninit(kv_dim * @sizeOf(f32)) catch null;
+            engine.d_gate = cuda.DeviceBuffer.allocUninit(cfg.hidden_dim * @sizeOf(f32)) catch null;
+            engine.d_up = cuda.DeviceBuffer.allocUninit(cfg.hidden_dim * @sizeOf(f32)) catch null;
+            engine.d_out = cuda.DeviceBuffer.allocUninit(@max(cfg.vocab_size, cfg.dim) * @sizeOf(f32)) catch null;
+            engine.d_key_cache = cuda.DeviceBuffer.allocUninit(cfg.n_layers * cfg.max_seq_len * kv_dim * @sizeOf(f32)) catch null;
+            engine.d_val_cache = cuda.DeviceBuffer.allocUninit(cfg.n_layers * cfg.max_seq_len * kv_dim * @sizeOf(f32)) catch null;
+
+            if (n_gpu == cfg.n_layers) {
+                engine.gpu_output_norm = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(output_norm_buf)) catch null;
+                engine.gpu_lm_head = cuda.DeviceBuffer.upload(lm_head.data) catch null;
+            }
         }
 
         return engine;
@@ -354,6 +573,21 @@ pub const TransformerEngine = struct {
             if (layer.owns_norms) {
                 self.allocator.free(layer.attn_norm);
                 self.allocator.free(layer.ffn_norm);
+                if (layer.attn_q_norm) |qn| self.allocator.free(qn);
+                if (layer.attn_k_norm) |kn| self.allocator.free(kn);
+            }
+            if (layer.is_gpu) {
+                if (layer.gpu_wq) |b| b.free();
+                if (layer.gpu_wk) |b| b.free();
+                if (layer.gpu_wv) |b| b.free();
+                if (layer.gpu_wo) |b| b.free();
+                if (layer.gpu_w_gate) |b| b.free();
+                if (layer.gpu_w_up) |b| b.free();
+                if (layer.gpu_w_down) |b| b.free();
+                if (layer.gpu_attn_norm) |b| b.free();
+                if (layer.gpu_ffn_norm) |b| b.free();
+                if (layer.gpu_attn_q_norm) |b| b.free();
+                if (layer.gpu_attn_k_norm) |b| b.free();
             }
         }
         self.layers.deinit(self.allocator);
@@ -361,6 +595,20 @@ pub const TransformerEngine = struct {
         if (self.owns_output_norm) {
             self.allocator.free(self.output_norm);
         }
+
+        if (self.d_x) |b| b.free();
+        if (self.d_xb) |b| b.free();
+        if (self.d_q) |b| b.free();
+        if (self.d_k) |b| b.free();
+        if (self.d_v) |b| b.free();
+        if (self.d_gate) |b| b.free();
+        if (self.d_up) |b| b.free();
+        if (self.d_out) |b| b.free();
+        if (self.d_key_cache) |b| b.free();
+        if (self.d_val_cache) |b| b.free();
+        if (self.gpu_output_norm) |b| b.free();
+        if (self.gpu_lm_head) |b| b.free();
+
         self.allocator.free(self.x);
         self.allocator.free(self.xb);
         self.allocator.free(self.q);
@@ -397,6 +645,47 @@ pub const TransformerEngine = struct {
                         }
                         out_y[r] = dot;
                     }
+                }
+            },
+            .bf16 => {
+                if (std.mem.isAligned(@intFromPtr(weight.data.ptr), @alignOf(u16))) {
+                    const w_u16: [*]const u16 = @ptrCast(@alignCast(weight.data.ptr));
+                    const total = @min(weight.rows * weight.cols, weight.data.len / 2);
+                    tensor_ops.gemvBF16(w_u16[0..total], in_x, bias, out_y[0..safe_rows], safe_rows, weight.cols);
+                } else {
+                    for (0..safe_rows) |r| {
+                        var dot: f32 = 0.0;
+                        const row_offset = r * weight.cols * 2;
+                        for (0..weight.cols) |c| {
+                            const off = row_offset + c * 2;
+                            if (off + 2 <= weight.data.len) {
+                                const u_val = std.mem.readInt(u16, weight.data[off .. off + 2][0..2], .little);
+                                dot += tensor_ops.bf16ToF32(u_val) * in_x[c];
+                            }
+                        }
+                        if (bias) |b| {
+                            if (r < b.len) dot += b[r];
+                        }
+                        out_y[r] = dot;
+                    }
+                }
+            },
+            .f16 => {
+                for (0..safe_rows) |r| {
+                    var dot: f32 = 0.0;
+                    const row_offset = r * weight.cols * 2;
+                    for (0..weight.cols) |c| {
+                        const off = row_offset + c * 2;
+                        if (off + 2 <= weight.data.len) {
+                            const u_val = std.mem.readInt(u16, weight.data[off .. off + 2][0..2], .little);
+                            const f_val: f32 = @floatCast(@as(f16, @bitCast(u_val)));
+                            dot += f_val * in_x[c];
+                        }
+                    }
+                    if (bias) |b| {
+                        if (r < b.len) dot += b[r];
+                    }
+                    out_y[r] = dot;
                 }
             },
             else => {
@@ -441,6 +730,28 @@ pub const TransformerEngine = struct {
                     }
                 }
             },
+            .bf16 => {
+                for (0..dim) |i| {
+                    const off = (tid * dim + i) * 2;
+                    if (off + 2 <= self.tok_embeddings.data.len) {
+                        const u_val = std.mem.readInt(u16, self.tok_embeddings.data[off .. off + 2][0..2], .little);
+                        out_x[i] = tensor_ops.bf16ToF32(u_val);
+                    } else {
+                        out_x[i] = 0.0;
+                    }
+                }
+            },
+            .f16 => {
+                for (0..dim) |i| {
+                    const off = (tid * dim + i) * 2;
+                    if (off + 2 <= self.tok_embeddings.data.len) {
+                        const u_val = std.mem.readInt(u16, self.tok_embeddings.data[off .. off + 2][0..2], .little);
+                        out_x[i] = @floatCast(@as(f16, @bitCast(u_val)));
+                    } else {
+                        out_x[i] = 0.0;
+                    }
+                }
+            },
             .q8_0 => {
                 const blocks_per_row = dim / 32;
                 const row_bytes = blocks_per_row * 34;
@@ -479,139 +790,259 @@ pub const TransformerEngine = struct {
     }
 
     /// Single autoregressive forward pass step: (token, pos) -> logits
+    /// Supports dynamic CPU/GPU offloading and 100% full GPU offloading path.
     pub fn forward(self: *TransformerEngine, token: u32, pos: usize) []const f32 {
         const cfg = self.config;
         const dim = cfg.dim;
         const head_dim = cfg.head_dim;
         const n_heads = cfg.n_heads;
         const n_kv_heads = cfg.n_kv_heads;
+        const kv_dim = @max(n_kv_heads * head_dim, dim);
         const n_rep = if (n_kv_heads > 0) @max(1, n_heads / n_kv_heads) else 1;
 
-        // 1. Embedding lookup
+        // 1. Embedding lookup on host
         self.lookupEmbedding(token, self.x);
+
+        var x_on_device = false;
 
         // 2. Transformer layers
         for (self.layers.items, 0..) |layer, l| {
-            // Attention RMSNorm
-            tensor_ops.rmsNormF32(self.x, layer.attn_norm, cfg.norm_eps, self.xb);
+            if (layer.is_gpu and self.d_x != null) {
+                if (!x_on_device) {
+                    self.d_x.?.copyFromHost(std.mem.sliceAsBytes(self.x)) catch {};
+                    x_on_device = true;
+                }
 
-            // Compute Q, K, V projections
-            matVec(layer.wq, self.xb, null, self.q);
-            matVec(layer.wk, self.xb, null, self.k);
-            matVec(layer.wv, self.xb, null, self.v);
+                // Attention RMSNorm on device
+                cuda.rmsNorm(self.d_x.?, layer.gpu_attn_norm.?, self.d_xb.?, dim, cfg.norm_eps) catch {};
 
-            // RoPE Rotary Position Embedding
-            if (head_dim >= 2) {
-                const half_dim = head_dim / 2;
+                // Compute Q, K, V projections on device
+                cuda.matVec(layer.gpu_wq.?, layer.wq.storage_type, self.d_xb.?, self.d_q.?, layer.wq.rows, layer.wq.cols) catch {};
+                cuda.matVec(layer.gpu_wk.?, layer.wk.storage_type, self.d_xb.?, self.d_k.?, layer.wk.rows, layer.wk.cols) catch {};
+                cuda.matVec(layer.gpu_wv.?, layer.wv.storage_type, self.d_xb.?, self.d_v.?, layer.wv.rows, layer.wv.cols) catch {};
+
+                // QK-Norm on device if present (Qwen3 / Gemma 2)
+                if (layer.gpu_attn_q_norm) |gpu_qn| {
+                    const qn_len = if (layer.attn_q_norm) |qn| qn.len else head_dim;
+                    cuda.headRmsNorm(self.d_q.?, gpu_qn, n_heads, head_dim, qn_len, cfg.norm_eps) catch {};
+                }
+                if (layer.gpu_attn_k_norm) |gpu_kn| {
+                    const kn_len = if (layer.attn_k_norm) |kn| kn.len else head_dim;
+                    cuda.headRmsNorm(self.d_k.?, gpu_kn, n_kv_heads, head_dim, kn_len, cfg.norm_eps) catch {};
+                }
+
+                // RoPE on device
+                if (head_dim >= 2) {
+                    cuda.rope(self.d_q.?, self.d_k.?, pos, n_heads, n_kv_heads, head_dim, cfg.rope_theta) catch {};
+                }
+
+                // KV Cache update on device
+                cuda.kvCacheUpdate(self.d_key_cache.?, self.d_val_cache.?, self.d_k.?, self.d_v.?, l, pos, cfg.max_seq_len, kv_dim) catch {};
+
+                // GQA Attention on device
+                cuda.gqaAttention(self.d_q.?, self.d_key_cache.?, self.d_val_cache.?, self.d_xb.?, l, pos, n_heads, n_kv_heads, head_dim, cfg.max_seq_len, kv_dim) catch {};
+
+                // Wo output projection on device: wo * xb -> q
+                cuda.matVec(layer.gpu_wo.?, layer.wo.storage_type, self.d_xb.?, self.d_q.?, layer.wo.rows, layer.wo.cols) catch {};
+
+                // Residual connection on device: x = x + q
+                cuda.addResidual(self.d_x.?, self.d_q.?, dim) catch {};
+
+                // Feed-Forward RMSNorm on device
+                cuda.rmsNorm(self.d_x.?, layer.gpu_ffn_norm.?, self.d_xb.?, dim, cfg.norm_eps) catch {};
+
+                // Gate & Up projections on device
+                cuda.matVec(layer.gpu_w_gate.?, layer.w_gate.storage_type, self.d_xb.?, self.d_gate.?, layer.w_gate.rows, layer.w_gate.cols) catch {};
+                cuda.matVec(layer.gpu_w_up.?, layer.w_up.storage_type, self.d_xb.?, self.d_up.?, layer.w_up.rows, layer.w_up.cols) catch {};
+
+                // SwiGLU activation on device: gate = SiLU(gate) * up
+                cuda.swiglu(self.d_gate.?, self.d_up.?, cfg.hidden_dim) catch {};
+
+                // Down projection on device: w_down * gate -> xb
+                cuda.matVec(layer.gpu_w_down.?, layer.w_down.storage_type, self.d_gate.?, self.d_xb.?, layer.w_down.rows, layer.w_down.cols) catch {};
+
+                // Residual connection on device: x = x + xb
+                cuda.addResidual(self.d_x.?, self.d_xb.?, dim) catch {};
+
+                // Determine if transition to host is needed
+                const next_is_cpu = if (l + 1 < self.layers.items.len) !self.layers.items[l + 1].is_gpu else (self.gpu_lm_head == null);
+                if (next_is_cpu) {
+                    self.d_x.?.download(std.mem.sliceAsBytes(self.x)) catch {};
+                    x_on_device = false;
+                }
+            } else {
+                // CPU Layer execution
+                if (x_on_device and self.d_x != null) {
+                    self.d_x.?.download(std.mem.sliceAsBytes(self.x)) catch {};
+                    x_on_device = false;
+                }
+
+                // Attention RMSNorm
+                tensor_ops.rmsNormF32(self.x, layer.attn_norm, cfg.norm_eps, self.xb);
+
+                // Compute Q, K, V projections
+                matVec(layer.wq, self.xb, null, self.q);
+                matVec(layer.wk, self.xb, null, self.k);
+                matVec(layer.wv, self.xb, null, self.v);
+
+                // QK-Norm before RoPE (Qwen3 / Gemma 2)
+                if (layer.attn_q_norm) |q_norm| {
+                    if (q_norm.len == head_dim) {
+                        for (0..n_heads) |h| {
+                            const q_head = self.q[h * head_dim .. (h + 1) * head_dim];
+                            tensor_ops.rmsNormF32(q_head, q_norm, cfg.norm_eps, q_head);
+                        }
+                    } else {
+                        const norm_len = @min(q_norm.len, self.q.len);
+                        for (0..n_heads) |h| {
+                            if ((h + 1) * head_dim <= norm_len) {
+                                const q_head = self.q[h * head_dim .. (h + 1) * head_dim];
+                                const q_w = q_norm[h * head_dim .. (h + 1) * head_dim];
+                                tensor_ops.rmsNormF32(q_head, q_w, cfg.norm_eps, q_head);
+                            }
+                        }
+                    }
+                }
+
+                if (layer.attn_k_norm) |k_norm| {
+                    if (k_norm.len == head_dim) {
+                        for (0..n_kv_heads) |h| {
+                            const k_head = self.k[h * head_dim .. (h + 1) * head_dim];
+                            tensor_ops.rmsNormF32(k_head, k_norm, cfg.norm_eps, k_head);
+                        }
+                    } else {
+                        const norm_len = @min(k_norm.len, self.k.len);
+                        for (0..n_kv_heads) |h| {
+                            if ((h + 1) * head_dim <= norm_len) {
+                                const k_head = self.k[h * head_dim .. (h + 1) * head_dim];
+                                const k_w = k_norm[h * head_dim .. (h + 1) * head_dim];
+                                tensor_ops.rmsNormF32(k_head, k_w, cfg.norm_eps, k_head);
+                            }
+                        }
+                    }
+                }
+
+                // RoPE Rotary Position Embedding
+                if (head_dim >= 2) {
+                    const half_dim = head_dim / 2;
+                    for (0..n_heads) |h| {
+                        if ((h + 1) * head_dim > self.q.len) break;
+                        const q_head = self.q[h * head_dim .. (h + 1) * head_dim];
+                        for (0..half_dim) |i| {
+                            const freq = 1.0 / std.math.pow(f32, cfg.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
+                            const val = @as(f32, @floatFromInt(pos)) * freq;
+                            const cos_val = @cos(val);
+                            const sin_val = @sin(val);
+                            const v0 = q_head[2 * i];
+                            const v1 = q_head[2 * i + 1];
+                            q_head[2 * i] = v0 * cos_val - v1 * sin_val;
+                            q_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
+                        }
+                    }
+
+                    for (0..n_kv_heads) |h| {
+                        if ((h + 1) * head_dim > self.k.len) break;
+                        const k_head = self.k[h * head_dim .. (h + 1) * head_dim];
+                        for (0..half_dim) |i| {
+                            const freq = 1.0 / std.math.pow(f32, cfg.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
+                            const val = @as(f32, @floatFromInt(pos)) * freq;
+                            const cos_val = @cos(val);
+                            const sin_val = @sin(val);
+                            const v0 = k_head[2 * i];
+                            const v1 = k_head[2 * i + 1];
+                            k_head[2 * i] = v0 * cos_val - v1 * sin_val;
+                            k_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
+                        }
+                    }
+                }
+
+                // Save key and value into KV cache
+                const k_cached = self.cache.getKeySlice(l, pos);
+                const v_cached = self.cache.getValSlice(l, pos);
+                const kv_copy_len = @min(k_cached.len, self.k.len);
+                @memcpy(k_cached[0..kv_copy_len], self.k[0..kv_copy_len]);
+                @memcpy(v_cached[0..kv_copy_len], self.v[0..kv_copy_len]);
+
+                // Grouped-Query Multi-Head Attention
+                @memset(self.xb, 0.0);
+                const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(@max(head_dim, 1))));
+
                 for (0..n_heads) |h| {
-                    if ((h + 1) * head_dim > self.q.len) break;
+                    if ((h + 1) * head_dim > self.q.len or (h + 1) * head_dim > self.xb.len) break;
                     const q_head = self.q[h * head_dim .. (h + 1) * head_dim];
-                    for (0..half_dim) |i| {
-                        const freq = 1.0 / std.math.pow(f32, cfg.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
-                        const val = @as(f32, @floatFromInt(pos)) * freq;
-                        const cos_val = @cos(val);
-                        const sin_val = @sin(val);
-                        const v0 = q_head[2 * i];
-                        const v1 = q_head[2 * i + 1];
-                        q_head[2 * i] = v0 * cos_val - v1 * sin_val;
-                        q_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
+                    const kv_head_idx = h / n_rep;
+
+                    // Compute attention scores for all cached tokens 0..=pos
+                    const max_t = @min(pos + 1, self.config.max_seq_len);
+                    for (0..max_t) |t| {
+                        const k_t = self.cache.getKeySlice(l, t);
+                        if ((kv_head_idx + 1) * head_dim > k_t.len) continue;
+                        const k_head = k_t[kv_head_idx * head_dim .. (kv_head_idx + 1) * head_dim];
+                        self.att[t] = tensor_ops.dotProductF32(q_head, k_head) * scale;
+                    }
+
+                    // Softmax over 0..=pos
+                    tensor_ops.softmaxF32(self.att[0..max_t], self.att[0..max_t]);
+
+                    // Weighted sum over V
+                    const out_head = self.xb[h * head_dim .. (h + 1) * head_dim];
+                    for (0..max_t) |t| {
+                        const a = self.att[t];
+                        const v_t = self.cache.getValSlice(l, t);
+                        if ((kv_head_idx + 1) * head_dim > v_t.len) continue;
+                        const v_head = v_t[kv_head_idx * head_dim .. (kv_head_idx + 1) * head_dim];
+                        for (0..head_dim) |d| {
+                            out_head[d] += a * v_head[d];
+                        }
                     }
                 }
 
-                for (0..n_kv_heads) |h| {
-                    if ((h + 1) * head_dim > self.k.len) break;
-                    const k_head = self.k[h * head_dim .. (h + 1) * head_dim];
-                    for (0..half_dim) |i| {
-                        const freq = 1.0 / std.math.pow(f32, cfg.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
-                        const val = @as(f32, @floatFromInt(pos)) * freq;
-                        const cos_val = @cos(val);
-                        const sin_val = @sin(val);
-                        const v0 = k_head[2 * i];
-                        const v1 = k_head[2 * i + 1];
-                        k_head[2 * i] = v0 * cos_val - v1 * sin_val;
-                        k_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
-                    }
-                }
-            }
+                // Attention Output Projection: wo * xb -> q
+                matVec(layer.wo, self.xb, null, self.q);
 
-            // Save key and value into KV cache
-            const k_cached = self.cache.getKeySlice(l, pos);
-            const v_cached = self.cache.getValSlice(l, pos);
-            const kv_copy_len = @min(k_cached.len, self.k.len);
-            @memcpy(k_cached[0..kv_copy_len], self.k[0..kv_copy_len]);
-            @memcpy(v_cached[0..kv_copy_len], self.v[0..kv_copy_len]);
-
-            // Grouped-Query Multi-Head Attention
-            @memset(self.xb, 0.0);
-            const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(@max(head_dim, 1))));
-
-            for (0..n_heads) |h| {
-                if ((h + 1) * head_dim > self.q.len or (h + 1) * head_dim > self.xb.len) break;
-                const q_head = self.q[h * head_dim .. (h + 1) * head_dim];
-                const kv_head_idx = h / n_rep;
-
-                // Compute attention scores for all cached tokens 0..=pos
-                const max_t = @min(pos + 1, self.config.max_seq_len);
-                for (0..max_t) |t| {
-                    const k_t = self.cache.getKeySlice(l, t);
-                    if ((kv_head_idx + 1) * head_dim > k_t.len) continue;
-                    const k_head = k_t[kv_head_idx * head_dim .. (kv_head_idx + 1) * head_dim];
-                    self.att[t] = tensor_ops.dotProductF32(q_head, k_head) * scale;
+                // Residual connection: x = x + q
+                const dim_len = @min(@min(dim, self.x.len), self.q.len);
+                for (0..dim_len) |i| {
+                    self.x[i] += self.q[i];
                 }
 
-                // Softmax over 0..=pos
-                tensor_ops.softmaxF32(self.att[0..max_t], self.att[0..max_t]);
+                // Feed-Forward SwiGLU Block
+                tensor_ops.rmsNormF32(self.x, layer.ffn_norm, cfg.norm_eps, self.xb);
+                matVec(layer.w_gate, self.xb, null, self.gate);
+                matVec(layer.w_up, self.xb, null, self.up);
 
-                // Weighted sum over V
-                const out_head = self.xb[h * head_dim .. (h + 1) * head_dim];
-                for (0..max_t) |t| {
-                    const a = self.att[t];
-                    const v_t = self.cache.getValSlice(l, t);
-                    if ((kv_head_idx + 1) * head_dim > v_t.len) continue;
-                    const v_head = v_t[kv_head_idx * head_dim .. (kv_head_idx + 1) * head_dim];
-                    for (0..head_dim) |d| {
-                        out_head[d] += a * v_head[d];
-                    }
+                // SiLU(gate) * up
+                const hidden_len = @min(@min(cfg.hidden_dim, self.gate.len), self.up.len);
+                for (0..hidden_len) |i| {
+                    const g = self.gate[i];
+                    const silu_g = g / (1.0 + @exp(-g));
+                    self.gate[i] = silu_g * self.up[i];
                 }
-            }
 
-            // Attention Output Projection: wo * xb -> q
-            matVec(layer.wo, self.xb, null, self.q);
+                // Down projection: w_down * gate -> xb
+                matVec(layer.w_down, self.gate, null, self.xb);
 
-            // Residual connection: x = x + q
-            const dim_len = @min(@min(dim, self.x.len), self.q.len);
-            for (0..dim_len) |i| {
-                self.x[i] += self.q[i];
-            }
-
-            // Feed-Forward SwiGLU Block
-            tensor_ops.rmsNormF32(self.x, layer.ffn_norm, cfg.norm_eps, self.xb);
-            matVec(layer.w_gate, self.xb, null, self.gate);
-            matVec(layer.w_up, self.xb, null, self.up);
-
-            // SiLU(gate) * up
-            const hidden_len = @min(@min(cfg.hidden_dim, self.gate.len), self.up.len);
-            for (0..hidden_len) |i| {
-                const g = self.gate[i];
-                const silu_g = g / (1.0 + @exp(-g));
-                self.gate[i] = silu_g * self.up[i];
-            }
-
-            // Down projection: w_down * gate -> xb
-            matVec(layer.w_down, self.gate, null, self.xb);
-
-            // Residual connection: x = x + xb
-            const xb_len = @min(@min(dim, self.x.len), self.xb.len);
-            for (0..xb_len) |i| {
-                self.x[i] += self.xb[i];
+                // Residual connection: x = x + xb
+                const xb_len = @min(@min(dim, self.x.len), self.xb.len);
+                for (0..xb_len) |i| {
+                    self.x[i] += self.xb[i];
+                }
             }
         }
 
-        // 3. Output RMSNorm
-        tensor_ops.rmsNormF32(self.x, self.output_norm, cfg.norm_eps, self.xb);
-
-        // 4. LM Head projection -> logits
-        matVec(self.lm_head, self.xb, null, self.logits);
+        // 3. Output RMSNorm & LM Head projection
+        if (x_on_device and self.gpu_lm_head != null and self.gpu_output_norm != null and self.d_x != null and self.d_xb != null and self.d_out != null) {
+            cuda.rmsNorm(self.d_x.?, self.gpu_output_norm.?, self.d_xb.?, dim, cfg.norm_eps) catch {};
+            cuda.matVec(self.gpu_lm_head.?, self.lm_head.storage_type, self.d_xb.?, self.d_out.?, self.lm_head.rows, self.lm_head.cols) catch {};
+            cuda.synchronize() catch {};
+            self.d_out.?.download(std.mem.sliceAsBytes(self.logits)) catch {};
+        } else {
+            if (x_on_device and self.d_x != null) {
+                self.d_x.?.download(std.mem.sliceAsBytes(self.x)) catch {};
+            }
+            tensor_ops.rmsNormF32(self.x, self.output_norm, cfg.norm_eps, self.xb);
+            matVec(self.lm_head, self.xb, null, self.logits);
+        }
 
         return self.logits;
     }

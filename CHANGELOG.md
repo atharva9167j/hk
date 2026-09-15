@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This release establishes the HK Neural Tensor Framework as a complete, unified replacement for legacy model formats (SafeTensors, GGUF, and PyTorch checkpoints). It packages raw unquantized weight storage with zero compute headroom, universal multi-device super-coalescing, dual-mode quantization, hardware structured sparsity, live architecture growth, and in-container evolution into a single seamless system.
 
 ### Core Container & Hardware Acceleration
+- **High-Performance CUDA GPU Backend & Dynamic Offloading (`-Dcuda=true`)**:
+  - Full end-to-end device inference path keeping activations and weights 100% resident in VRAM across all layers (`RMSNorm`, `QK-Norm`, `RoPE`, device KV-Cache, `GQA Attention`, `SwiGLU`, and `LM Head`).
+  - Dynamic user-controlled layer offloading (`-ngl <N>` / `--gpu-layers <N>`) balancing CPU/GPU memory budgets with seamless zero-overhead boundary transitions.
+  - Optimized CUDA device kernels featuring zero-overhead warp shuffles (`__shfl_down_sync`), 128-bit vectorized memory transactions (`float4` / `int4`), and hardware acceleration for F32, Q8_0, and Q4_0 quantizations.
+  - Architectural Parity & QK-Norm: Native per-head query/key RMSNorm normalization (`attn_q_norm` and `attn_k_norm`) on both CPU and GPU, ensuring bit-exact model output correctness for Qwen3, Gemma 2, and next-generation foundation models.
+  - Standalone benchmarks: `hk-gpu-bench` and `hk-cpu-bench` for direct device memory throughput and token generation rate analysis.
 - **Universal Multi-Device Super-Coalescing (`HeaderFlags.UNIVERSAL_PAGE_ALIGNED = 0x100`)**:
   - Super-coalesced 4096-byte (4 KB) page alignment satisfying AMD ROCm DirectGMA, Intel NPU/OpenVINO Direct DMA, Apple Silicon Metal (16 KB), and ARM NEON/SVE.
   - **NVIDIA Tensor Core Coalescing Invariance**: Because $4096 = 32 \times 128$, a single shared `.hk` file guarantees 100% strict 128-byte warp-coalesced memory transactions with zero performance loss and zero storage duplication.
