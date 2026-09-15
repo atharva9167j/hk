@@ -1429,8 +1429,10 @@ fn cmdRun(
         std.debug.print("Error initializing transformer engine: {}\n", .{err});
         return;
     };
-    defer engine.deinit();
-    defer allocator.destroy(engine);
+    defer {
+        engine.deinit();
+        allocator.destroy(engine);
+    }
 
     if (engine.n_gpu_layers > 0) {
         std.debug.print("Device offload active: {}/{} layers offloaded to GPU\n", .{ engine.n_gpu_layers, engine.config.n_layers });
@@ -1517,8 +1519,10 @@ fn cmdChat(
         std.debug.print("Error initializing transformer engine: {}\n", .{err});
         return;
     };
-    defer engine.deinit();
-    defer allocator.destroy(engine);
+    defer {
+        engine.deinit();
+        allocator.destroy(engine);
+    }
 
     if (engine.n_gpu_layers > 0) {
         std.debug.print("Device offload active: {}/{} layers offloaded to GPU\n", .{ engine.n_gpu_layers, engine.config.n_layers });

@@ -220,8 +220,10 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Failed to initialize engine on GPU: {}\n", .{err});
         return;
     };
-    defer engine.deinit();
-    defer allocator.destroy(engine);
+    defer {
+        engine.deinit();
+        allocator.destroy(engine);
+    }
 
     std.debug.print("  engine offload   : {}/{} layers on GPU\n", .{ engine.n_gpu_layers, engine.config.n_layers });
     const e2e_start = std.Io.Clock.Timestamp.now(io, .awake);

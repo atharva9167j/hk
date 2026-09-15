@@ -26,8 +26,10 @@ pub fn main(init: std.process.Init) !void {
     defer reader.deinit();
 
     var engine = try hk.inference.TransformerEngine.initFromReader(allocator, &reader);
-    defer engine.deinit();
-    defer allocator.destroy(engine);
+    defer {
+        engine.deinit();
+        allocator.destroy(engine);
+    }
 
     std.debug.print("layers={d} dim={d} n_heads={d} n_kv_heads={d} vocab={d}\n", .{
         engine.config.n_layers, engine.config.dim, engine.config.n_heads,

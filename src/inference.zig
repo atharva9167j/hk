@@ -387,10 +387,14 @@ pub const TransformerEngine = struct {
         engine.owns_output_norm = true;
         errdefer engine.deinit();
 
-        // Determine number of GPU layers to offload
-        const target_gpu_layers = options.gpu_layers orelse (if (cuda.isAvailable()) cfg.n_layers else 0);
-        const n_gpu = @min(target_gpu_layers, cfg.n_layers);
-        engine.n_gpu_layers = n_gpu;
+        // Determine number of GPU layers to offload:
+        // By default, offload as high as possible (all layers), dynamically
+        // allocating VRAM for each layer until VRAM budget is reached or all layers offloaded.
+        const target_gpu_layers = options.gpu_layers orelse cfg.n_layers;
+        const n_gpu = if (cuda.isAvailable()) @min(target_gpu_layers, cfg.n_layers) else 0;
+
+        var actual_gpu_layers: usize = 0;
+        var can_offload_more: bool = (n_gpu > 0 and cuda.isAvailable());
 
         for (0..cfg.n_layers) |l| {
             var buf1: [64]u8 = undefined;
@@ -415,38 +419,50 @@ pub const TransformerEngine = struct {
 
             const attn_norm_e = reader.toc.find(attn_norm_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf1, "model.layers.{}.input_layernorm.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf1, "layers.{}.input_layernorm.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf1, "mtp.layers.{}.input_layernorm.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const wq_e = reader.toc.find(wq_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf2, "model.layers.{}.self_attn.q_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf2, "layers.{}.q_proj.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf2, "mtp.layers.{}.self_attn.q_proj.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const wk_e = reader.toc.find(wk_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf3, "model.layers.{}.self_attn.k_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf3, "layers.{}.k_proj.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf3, "mtp.layers.{}.self_attn.k_proj.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const wv_e = reader.toc.find(wv_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf4, "model.layers.{}.self_attn.v_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf4, "layers.{}.v_proj.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf4, "mtp.layers.{}.self_attn.v_proj.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const wo_e = reader.toc.find(wo_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf5, "model.layers.{}.self_attn.o_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf5, "layers.{}.out_proj.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf5, "mtp.layers.{}.self_attn.o_proj.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const ffn_norm_e = reader.toc.find(ffn_norm_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf6, "model.layers.{}.post_attention_layernorm.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf6, "layers.{}.post_attention_layernorm.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf6, "mtp.layers.{}.post_attention_layernorm.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const wgate_e = reader.toc.find(wgate_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf7, "model.layers.{}.mlp.gate_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf7, "layers.{}.gate_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf7, "layers.{}.mlp_fc1.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf7, "mtp.layers.{}.mlp.gate_proj.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const wup_e = reader.toc.find(wup_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf8, "model.layers.{}.mlp.up_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf8, "layers.{}.up_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf8, "layers.{}.mlp_fc1.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf8, "mtp.layers.{}.mlp.up_proj.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
             const wdown_e = reader.toc.find(wdown_name) orelse
                 reader.toc.find(std.fmt.bufPrint(&buf9, "model.layers.{}.mlp.down_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf9, "layers.{}.down_proj.weight", .{l}) catch "") orelse
+                reader.toc.find(std.fmt.bufPrint(&buf9, "layers.{}.mlp_fc2.weight", .{l}) catch "") orelse
                 reader.toc.find(std.fmt.bufPrint(&buf9, "mtp.layers.{}.mlp.down_proj.weight", .{l}) catch "") orelse
                 return error.MissingLayerTensor;
 
@@ -501,7 +517,8 @@ pub const TransformerEngine = struct {
             var gpu_qn: ?cuda.DeviceBuffer = null;
             var gpu_kn: ?cuda.DeviceBuffer = null;
 
-            if (l < n_gpu and cuda.isAvailable()) {
+            var is_gpu_layer = false;
+            if (l < n_gpu and can_offload_more) {
                 gpu_wq = cuda.DeviceBuffer.upload(wq_data) catch null;
                 gpu_wk = cuda.DeviceBuffer.upload(wk_data) catch null;
                 gpu_wv = cuda.DeviceBuffer.upload(wv_data) catch null;
@@ -513,6 +530,30 @@ pub const TransformerEngine = struct {
                 gpu_f_norm = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(f_norm_buf)) catch null;
                 if (qn_buf) |qn| gpu_qn = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(qn)) catch null;
                 if (kn_buf) |kn| gpu_kn = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(kn)) catch null;
+
+                const all_uploaded = (gpu_wq != null and gpu_wk != null and gpu_wv != null and gpu_wo != null and
+                    gpu_w_gate != null and gpu_w_up != null and gpu_w_down != null and
+                    gpu_a_norm != null and gpu_f_norm != null and
+                    (qn_buf == null or gpu_qn != null) and (kn_buf == null or gpu_kn != null));
+
+                if (all_uploaded) {
+                    is_gpu_layer = true;
+                    actual_gpu_layers += 1;
+                } else {
+                    // Out of VRAM or allocation error: clean up partial buffers and keep remaining layers on CPU
+                    if (gpu_wq) |b| b.free(); gpu_wq = null;
+                    if (gpu_wk) |b| b.free(); gpu_wk = null;
+                    if (gpu_wv) |b| b.free(); gpu_wv = null;
+                    if (gpu_wo) |b| b.free(); gpu_wo = null;
+                    if (gpu_w_gate) |b| b.free(); gpu_w_gate = null;
+                    if (gpu_w_up) |b| b.free(); gpu_w_up = null;
+                    if (gpu_w_down) |b| b.free(); gpu_w_down = null;
+                    if (gpu_a_norm) |b| b.free(); gpu_a_norm = null;
+                    if (gpu_f_norm) |b| b.free(); gpu_f_norm = null;
+                    if (gpu_qn) |b| b.free(); gpu_qn = null;
+                    if (gpu_kn) |b| b.free(); gpu_kn = null;
+                    can_offload_more = false;
+                }
             }
 
             try engine.layers.append(allocator, .{
@@ -539,12 +580,14 @@ pub const TransformerEngine = struct {
                 .gpu_ffn_norm = gpu_f_norm,
                 .gpu_attn_q_norm = gpu_qn,
                 .gpu_attn_k_norm = gpu_kn,
-                .is_gpu = (gpu_wq != null),
+                .is_gpu = is_gpu_layer,
             });
         }
 
+        engine.n_gpu_layers = actual_gpu_layers;
+
         // Allocate device scratch buffers if at least one layer is offloaded
-        if (n_gpu > 0 and cuda.isAvailable()) {
+        if (actual_gpu_layers > 0 and cuda.isAvailable()) {
             const kv_dim = @max(cfg.n_kv_heads * cfg.head_dim, cfg.dim);
             const max_q_dim = @max(cfg.n_heads * cfg.head_dim, cfg.dim);
 
@@ -559,7 +602,7 @@ pub const TransformerEngine = struct {
             engine.d_key_cache = cuda.DeviceBuffer.allocUninit(cfg.n_layers * cfg.max_seq_len * kv_dim * @sizeOf(f32)) catch null;
             engine.d_val_cache = cuda.DeviceBuffer.allocUninit(cfg.n_layers * cfg.max_seq_len * kv_dim * @sizeOf(f32)) catch null;
 
-            if (n_gpu == cfg.n_layers) {
+            if (actual_gpu_layers == cfg.n_layers) {
                 engine.gpu_output_norm = cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(output_norm_buf)) catch null;
                 engine.gpu_lm_head = cuda.DeviceBuffer.upload(lm_head.data) catch null;
             }
