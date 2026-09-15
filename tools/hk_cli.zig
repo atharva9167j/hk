@@ -1456,7 +1456,6 @@ fn cmdRun(
     var last_logits: []const f32 = &[_]f32{};
 
     const io = std.Options.debug_io;
-    const start_time = std.Io.Timestamp.now(io, .awake);
 
     while (pos < prompt_tokens.items.len) : (pos += 1) {
         last_logits = engine.forward(prompt_tokens.items[pos], pos);
@@ -1468,19 +1467,25 @@ fn cmdRun(
 
     std.debug.print("\nResponse:\n", .{});
 
+    const logits_buf = try allocator.alloc(f32, engine.config.vocab_size);
+    defer allocator.free(logits_buf);
+
+    var token_text: std.ArrayList(u8) = .empty;
+    defer token_text.deinit(allocator);
+
+    const gen_start_time = std.Io.Timestamp.now(io, .awake);
+
     var gen_count: usize = 0;
     while (gen_count < max_tokens) : (gen_count += 1) {
         if (pos >= engine.config.max_seq_len) break;
 
-        const logits_buf = try allocator.alloc(f32, last_logits.len);
-        defer allocator.free(logits_buf);
-        @memcpy(logits_buf, last_logits);
+        const copy_len = @min(logits_buf.len, last_logits.len);
+        @memcpy(logits_buf[0..copy_len], last_logits[0..copy_len]);
 
-        const next_token = try sampler.sample(allocator, logits_buf, params, history.items);
+        const next_token = try sampler.sample(allocator, logits_buf[0..copy_len], params, history.items);
         if (tok.eos_id != null and next_token == tok.eos_id.?) break;
 
-        var token_text: std.ArrayList(u8) = .empty;
-        defer token_text.deinit(allocator);
+        token_text.clearRetainingCapacity();
         try tok.decode(&.{next_token}, false, &token_text);
 
         std.debug.print("{s}", .{token_text.items});
@@ -1491,7 +1496,7 @@ fn cmdRun(
     }
 
     const end_time = std.Io.Timestamp.now(io, .awake);
-    const duration_ns = end_time.nanoseconds - start_time.nanoseconds;
+    const duration_ns = end_time.nanoseconds - gen_start_time.nanoseconds;
     const duration_ms = @max(@divTrunc(duration_ns, 1_000_000), 1);
     const tok_per_sec = (@as(f64, @floatFromInt(gen_count)) * 1000.0) / @as(f64, @floatFromInt(duration_ms));
 
@@ -1588,17 +1593,21 @@ fn cmdChat(
         var answer_tokens: std.ArrayList(u8) = .empty;
         defer answer_tokens.deinit(allocator);
 
+        const logits_buf = try allocator.alloc(f32, engine.config.vocab_size);
+        defer allocator.free(logits_buf);
+
+        var token_text: std.ArrayList(u8) = .empty;
+        defer token_text.deinit(allocator);
+
         var gen_count: usize = 0;
         while (gen_count < 512 and pos < engine.config.max_seq_len) : (gen_count += 1) {
-            const logits_buf = try allocator.alloc(f32, last_logits.len);
-            defer allocator.free(logits_buf);
-            @memcpy(logits_buf, last_logits);
+            const copy_len = @min(logits_buf.len, last_logits.len);
+            @memcpy(logits_buf[0..copy_len], last_logits[0..copy_len]);
 
-            const next_token = try sampler.sample(allocator, logits_buf, params, history.items);
+            const next_token = try sampler.sample(allocator, logits_buf[0..copy_len], params, history.items);
             if (tok.eos_id != null and next_token == tok.eos_id.?) break;
 
-            var token_text: std.ArrayList(u8) = .empty;
-            defer token_text.deinit(allocator);
+            token_text.clearRetainingCapacity();
             try tok.decode(&.{next_token}, false, &token_text);
 
             std.debug.print("{s}", .{token_text.items});

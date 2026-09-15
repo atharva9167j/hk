@@ -77,7 +77,83 @@ pub const Sampler = struct {
             if (l > max_logit) max_logit = l;
         }
 
-        // 4. Compute exponentials and sum
+        // Fast path for top-k <= 256 (avoids allocating and sorting entire vocab)
+        if (params.top_k > 0 and params.top_k <= 256) {
+            const k = @min(params.top_k, vocab_size);
+            var top_k_buf: [256]TokenProb = undefined;
+            var count: usize = 0;
+
+            for (logits, 0..) |l, i| {
+                const exp_val = @exp(l - max_logit);
+                if (count < k) {
+                    var ins_idx = count;
+                    while (ins_idx > 0 and top_k_buf[ins_idx - 1].prob < exp_val) : (ins_idx -= 1) {
+                        top_k_buf[ins_idx] = top_k_buf[ins_idx - 1];
+                    }
+                    top_k_buf[ins_idx] = .{ .id = @intCast(i), .prob = exp_val };
+                    count += 1;
+                } else if (exp_val > top_k_buf[k - 1].prob) {
+                    var ins_idx = k - 1;
+                    while (ins_idx > 0 and top_k_buf[ins_idx - 1].prob < exp_val) : (ins_idx -= 1) {
+                        top_k_buf[ins_idx] = top_k_buf[ins_idx - 1];
+                    }
+                    top_k_buf[ins_idx] = .{ .id = @intCast(i), .prob = exp_val };
+                }
+            }
+
+            var sum: f32 = 0.0;
+            for (top_k_buf[0..count]) |c| {
+                sum += c.prob;
+            }
+            if (sum <= 0.0 or std.math.isNan(sum)) {
+                return sampleGreedy(logits);
+            }
+            const inv_sum = 1.0 / sum;
+            for (top_k_buf[0..count]) |*c| {
+                c.prob *= inv_sum;
+            }
+
+            // Min-P filtering
+            var valid_count: usize = count;
+            if (params.min_p > 0.0 and count > 0) {
+                const min_p_threshold = top_k_buf[0].prob * params.min_p;
+                var vc: usize = 0;
+                for (top_k_buf[0..count]) |c| {
+                    if (c.prob >= min_p_threshold) {
+                        top_k_buf[vc] = c;
+                        vc += 1;
+                    }
+                }
+                valid_count = if (vc > 0) vc else 1;
+            }
+
+            // Top-P (nucleus) truncation
+            if (params.top_p < 1.0) {
+                var cum_sum: f32 = 0.0;
+                var cut_idx: usize = 1;
+                while (cut_idx < valid_count) : (cut_idx += 1) {
+                    cum_sum += top_k_buf[cut_idx - 1].prob;
+                    if (cum_sum >= params.top_p) break;
+                }
+                valid_count = cut_idx;
+            }
+
+            var filtered_sum: f32 = 0.0;
+            for (top_k_buf[0..valid_count]) |c| {
+                filtered_sum += c.prob;
+            }
+            if (filtered_sum <= 0.0) return top_k_buf[0].id;
+
+            const rand_val = self.prng.random().float(f32) * filtered_sum;
+            var running: f32 = 0.0;
+            for (top_k_buf[0..valid_count]) |c| {
+                running += c.prob;
+                if (running >= rand_val) return c.id;
+            }
+            return top_k_buf[0].id;
+        }
+
+        // General path for unbounded top-k / large vocabs
         var candidates = try allocator.alloc(TokenProb, vocab_size);
         defer allocator.free(candidates);
 

@@ -62,13 +62,14 @@ pub fn dotProductF32(a: []const f32, b: []const f32) f32 {
         acc3 += va3 * vb3;
     }
 
-    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3));
-
+    var rem_acc: @Vector(8, f32) = @splat(0.0);
     while (i + 8 <= len) : (i += 8) {
         const va: @Vector(8, f32) = a[i..][0..8].*;
         const vb: @Vector(8, f32) = b[i..][0..8].*;
-        sum += @reduce(.Add, va * vb);
+        rem_acc += va * vb;
     }
+
+    var sum = @reduce(.Add, (acc0 + acc1) + (acc2 + acc3) + rem_acc);
 
     // Scalar remainder
     while (i < len) : (i += 1) {
@@ -89,19 +90,31 @@ pub fn gemvF32(
     K: usize,
 ) void {
     const safe_M = @min(M, y.len);
-    for (0..safe_M) |r| {
-        const row_start = r * K;
-        const row_end = @min(row_start + K, W.len);
-        if (row_start >= W.len) {
-            y[r] = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
-            continue;
+    if (bias) |b| {
+        for (0..safe_M) |r| {
+            const row_start = r * K;
+            if (row_start + K <= W.len) {
+                const b_val = if (r < b.len) b[r] else 0.0;
+                y[r] = dotProductF32(W[row_start .. row_start + K], x) + b_val;
+            } else if (row_start < W.len) {
+                const b_val = if (r < b.len) b[r] else 0.0;
+                y[r] = dotProductF32(W[row_start..], x[0 .. W.len - row_start]) + b_val;
+            } else {
+                y[r] = if (r < b.len) b[r] else 0.0;
+            }
         }
-        const row = W[row_start..row_end];
-        var dot = dotProductF32(row, x);
-        if (bias) |b| {
-            if (r < b.len) dot += b[r];
+    } else {
+        var row_start: usize = 0;
+        for (0..safe_M) |r| {
+            if (row_start + K <= W.len) {
+                y[r] = dotProductF32(W[row_start .. row_start + K], x);
+            } else if (row_start < W.len) {
+                y[r] = dotProductF32(W[row_start..], x[0 .. W.len - row_start]);
+            } else {
+                y[r] = 0.0;
+            }
+            row_start += K;
         }
-        y[r] = dot;
     }
 }
 
