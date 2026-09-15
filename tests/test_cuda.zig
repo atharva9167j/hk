@@ -200,3 +200,77 @@ test "cuda swiglu matches reference" {
     }
     std.debug.print("[cuda] swiglu: dim={d} -- OK\n", .{hidden_dim});
 }
+
+test "cuda add residual matches reference" {
+    var prng = std.Random.DefaultPrng.init(303);
+    const rand = prng.random();
+
+    const dim: usize = 256;
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const x = try allocator.alloc(f32, dim);
+    defer allocator.free(x);
+    const res = try allocator.alloc(f32, dim);
+    defer allocator.free(res);
+    const ref = try allocator.alloc(f32, dim);
+    defer allocator.free(ref);
+
+    for (0..dim) |i| {
+        x[i] = rand.float(f32) * 2.0 - 1.0;
+        res[i] = rand.float(f32) * 2.0 - 1.0;
+        ref[i] = x[i] + res[i];
+    }
+
+    const d_x = try cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(x));
+    defer d_x.free();
+    const d_res = try cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(res));
+    defer d_res.free();
+
+    try cuda.addResidual(d_x, d_res, dim);
+    try cuda.synchronize();
+
+    const out_gpu = try allocator.alloc(f32, dim);
+    defer allocator.free(out_gpu);
+    try d_x.download(std.mem.sliceAsBytes(out_gpu));
+
+    for (ref, out_gpu) |rv, gv| {
+        try std.testing.expectApproxEqAbs(rv, gv, 1e-5);
+    }
+    std.debug.print("[cuda] add residual: dim={d} -- OK\n", .{dim});
+}
+
+test "cuda stream and event profiling" {
+    var stream = try cuda.CudaStream.create();
+    defer stream.destroy();
+
+    var start = try cuda.CudaEvent.create();
+    defer start.destroy();
+    var end = try cuda.CudaEvent.create();
+    defer end.destroy();
+
+    try start.record(stream);
+
+    const dim: usize = 1024;
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const buf = try allocator.alloc(f32, dim);
+    defer allocator.free(buf);
+    @memset(buf, 1.0);
+
+    const d_buf = try cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(buf));
+    defer d_buf.free();
+
+    try cuda.swiglu(d_buf, d_buf, dim);
+    try end.record(stream);
+
+    try stream.synchronize();
+    try end.synchronize();
+
+    const elapsed = try cuda.CudaEvent.elapsedMs(&start, &end);
+    std.debug.print("[cuda] stream & event timing: {d:.3} ms -- OK\n", .{elapsed});
+    try std.testing.expect(elapsed >= 0.0);
+}

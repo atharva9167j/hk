@@ -7,13 +7,8 @@ pub fn build(b: *std.Build) void {
     const cuda_enabled = b.option(
         bool,
         "cuda",
-        "Build the CUDA GPU backend (requires nvcc + CUDA toolkit on PATH)",
-    ) orelse false;
-    const cuda_path = b.option(
-        []const u8,
-        "cuda-path",
-        "CUDA toolkit root (containing include/ and targets/x86_64-linux/lib)",
-    ) orelse "/usr/local/cuda";
+        "Enable the CUDA GPU backend (dynamically loads CUDA driver API at runtime)",
+    ) orelse true;
 
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "cuda", cuda_enabled);
@@ -29,31 +24,9 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // CUDA GPU backend (src/cuda/hk_cuda.cu -> hk_cuda.o via nvcc), linked into
-    // hk_mod only: cli_exe/lib/tests all depend on hk_mod, and Zig's module
-    // graph propagates its object files/library links to whatever links it in
-    // -- attaching this a second time on a dependent module duplicates symbols.
     if (cuda_enabled) {
-        const is_windows = target.result.os.tag == .windows;
-        const nvcc = b.addSystemCommand(&.{
-            "nvcc",
-            "-O3",
-            "-arch=native",
-            "--compiler-options",
-            if (is_windows) "/MD" else "-fPIC",
-            "-c",
-            "src/cuda/hk_cuda.cu",
-            "-o",
-        });
-        const obj_path = nvcc.addOutputFileArg(if (is_windows) "hk_cuda.obj" else "hk_cuda.o");
-        hk_mod.addObjectFile(obj_path);
-        if (is_windows) {
-            hk_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib/x64", .{cuda_path}) });
-            hk_mod.linkSystemLibrary("cudart", .{});
-        } else {
-            hk_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/targets/x86_64-linux/lib", .{cuda_path}) });
-            hk_mod.linkSystemLibrary("cudart", .{});
-            hk_mod.linkSystemLibrary("stdc++", .{});
+        if (target.result.os.tag != .windows) {
+            hk_mod.linkSystemLibrary("dl", .{});
         }
     }
 
@@ -138,7 +111,8 @@ pub fn build(b: *std.Build) void {
         });
         const cuda_tests = b.addTest(.{ .root_module = cuda_tests_mod });
         const run_cuda_tests = b.addRunArtifact(cuda_tests);
-        const cuda_test_step = b.step("test-cuda", "Run CUDA GPU backend correctness tests (requires -Dcuda=true)");
+        const cuda_test_step = b.step("test-cuda", "Run CUDA GPU backend correctness tests");
         cuda_test_step.dependOn(&run_cuda_tests.step);
+        test_step.dependOn(&run_cuda_tests.step);
     }
 }
