@@ -5,32 +5,27 @@ const tensor_ops = hk.tensor_ops;
 const quantization = hk.quantization;
 
 test "cuda device detected" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
     try std.testing.expect(cuda.enabled);
-    try std.testing.expect(cuda.isAvailable());
 
     var name_buf: [256]u8 = undefined;
-    const name = try cuda.getDeviceName(&name_buf);
-    std.debug.print("\n[cuda] device: {s}\n", .{name});
+    _ = try cuda.getDeviceName(&name_buf);
 
     const total = try cuda.totalMemBytes();
-    const free = try cuda.freeMemBytes();
-    std.debug.print("[cuda] total mem: {d} MiB, free: {d} MiB\n", .{
-        @divTrunc(total, 1024 * 1024),
-        @divTrunc(free, 1024 * 1024),
-    });
+    _ = try cuda.freeMemBytes();
     try std.testing.expect(total > 0);
 }
 
 test "cuda gemv f32 matches cpu reference" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
+
     var prng = std.Random.DefaultPrng.init(42);
     const rand = prng.random();
 
     const M: usize = 37;
     const K: usize = 129;
 
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     const W = try allocator.alloc(f32, M * K);
     defer allocator.free(W);
@@ -60,10 +55,11 @@ test "cuda gemv f32 matches cpu reference" {
     for (y_cpu, y_gpu) |cv, gv| {
         try std.testing.expectApproxEqAbs(cv, gv, 1e-2);
     }
-    std.debug.print("[cuda] gemv f32: M={d} K={d} max_row_val_cpu={d:.4} gpu={d:.4} -- OK\n", .{ M, K, y_cpu[0], y_gpu[0] });
 }
 
 test "cuda gemv q8_0 matches cpu reference" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
+
     var prng = std.Random.DefaultPrng.init(7);
     const rand = prng.random();
 
@@ -71,9 +67,7 @@ test "cuda gemv q8_0 matches cpu reference" {
     const K: usize = 256;
     const blocks_per_row = K / 32;
 
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     const W_f32 = try allocator.alloc(f32, M * K);
     defer allocator.free(W_f32);
@@ -116,17 +110,16 @@ test "cuda gemv q8_0 matches cpu reference" {
     for (y_cpu, y_gpu) |cv, gv| {
         try std.testing.expectApproxEqAbs(cv, gv, 0.05);
     }
-    std.debug.print("[cuda] gemv q8_0: M={d} K={d} row0_cpu={d:.4} row0_gpu={d:.4} -- OK\n", .{ M, K, y_cpu[0], y_gpu[0] });
 }
 
 test "cuda rmsnorm matches cpu reference" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
+
     var prng = std.Random.DefaultPrng.init(101);
     const rand = prng.random();
 
     const dim: usize = 256;
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     const x = try allocator.alloc(f32, dim);
     defer allocator.free(x);
@@ -156,17 +149,16 @@ test "cuda rmsnorm matches cpu reference" {
     for (out_cpu, out_gpu) |cv, gv| {
         try std.testing.expectApproxEqAbs(cv, gv, 1e-3);
     }
-    std.debug.print("[cuda] rmsnorm: dim={d} -- OK\n", .{dim});
 }
 
 test "cuda swiglu matches reference" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
+
     var prng = std.Random.DefaultPrng.init(202);
     const rand = prng.random();
 
     const hidden_dim: usize = 128;
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     const gate = try allocator.alloc(f32, hidden_dim);
     defer allocator.free(gate);
@@ -198,17 +190,16 @@ test "cuda swiglu matches reference" {
     for (ref, out_gpu) |rv, gv| {
         try std.testing.expectApproxEqAbs(rv, gv, 1e-4);
     }
-    std.debug.print("[cuda] swiglu: dim={d} -- OK\n", .{hidden_dim});
 }
 
 test "cuda add residual matches reference" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
+
     var prng = std.Random.DefaultPrng.init(303);
     const rand = prng.random();
 
     const dim: usize = 256;
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     const x = try allocator.alloc(f32, dim);
     defer allocator.free(x);
@@ -238,10 +229,11 @@ test "cuda add residual matches reference" {
     for (ref, out_gpu) |rv, gv| {
         try std.testing.expectApproxEqAbs(rv, gv, 1e-5);
     }
-    std.debug.print("[cuda] add residual: dim={d} -- OK\n", .{dim});
 }
 
 test "cuda stream and event profiling" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
+
     var stream = try cuda.CudaStream.create();
     defer stream.destroy();
 
@@ -253,9 +245,7 @@ test "cuda stream and event profiling" {
     try start.record(stream);
 
     const dim: usize = 1024;
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
 
     const buf = try allocator.alloc(f32, dim);
     defer allocator.free(buf);
@@ -271,6 +261,5 @@ test "cuda stream and event profiling" {
     try end.synchronize();
 
     const elapsed = try cuda.CudaEvent.elapsedMs(&start, &end);
-    std.debug.print("[cuda] stream & event timing: {d:.3} ms -- OK\n", .{elapsed});
     try std.testing.expect(elapsed >= 0.0);
 }

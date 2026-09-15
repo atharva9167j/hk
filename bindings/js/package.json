@@ -1,6 +1,6 @@
 {
   "name": "hkntf",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "TypeScript / JavaScript bindings for the HK neural tensor format and SIMD compute engine.",
   "type": "module",
   "main": "dist/hk.js",

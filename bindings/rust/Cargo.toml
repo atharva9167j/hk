@@ -1,6 +1,6 @@
 [package]
 name = "hknt"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Safe idiomatic Rust bindings for the HK neural tensor format and SIMD compute engine."
 license = "Apache-2.0"

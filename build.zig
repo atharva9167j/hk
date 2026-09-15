@@ -4,11 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const default_cuda = target.result.os.tag != .macos;
     const cuda_enabled = b.option(
         bool,
         "cuda",
         "Enable the CUDA GPU backend (dynamically loads CUDA driver API at runtime)",
-    ) orelse true;
+    ) orelse default_cuda;
 
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "cuda", cuda_enabled);
@@ -80,6 +81,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     const tests = b.addTest(.{
+        .name = "hk-tests",
         .root_module = tests_mod,
     });
     const run_tests = b.addRunArtifact(tests);
@@ -109,7 +111,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "hk", .module = hk_mod },
             },
         });
-        const cuda_tests = b.addTest(.{ .root_module = cuda_tests_mod });
+        const cuda_tests = b.addTest(.{
+            .name = "hk-cuda-tests",
+            .root_module = cuda_tests_mod,
+        });
         const run_cuda_tests = b.addRunArtifact(cuda_tests);
         const cuda_test_step = b.step("test-cuda", "Run CUDA GPU backend correctness tests");
         cuda_test_step.dependOn(&run_cuda_tests.step);

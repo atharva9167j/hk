@@ -193,7 +193,7 @@ fn ensureDriver() !*DriverState {
 
 fn getProc(comptime T: type, handle: *anyopaque, name: [*:0]const u8) ?T {
     const p = Loader.lookup(handle, name) orelse return null;
-    return @ptrCast(p);
+    return @ptrCast(@alignCast(p));
 }
 
 fn initFromHandle(handle: *anyopaque) !*DriverState {

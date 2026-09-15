@@ -7,9 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] - 2026-09-15 - Documentation Overhaul & CI Reliability
+
+### Fixed & Enhanced
+- **Cloud CI GPU Driver Absence**:
+  - Guarded all CUDA backend correctness tests in `tests/test_cuda.zig` with runtime driver detection (`SkipZigTest`), ensuring automated tests pass on headless cloud runners without physical GPUs while retaining full GPU verification on local machines.
+  - Resolved strict alignment compilation errors on ARM architectures (`aarch64-linux`, `aarch64-macos`) in `src/cuda.zig` by adding `@alignCast` to function pointer casts.
+  - Defaulted macOS targets to `cuda = false` in `build.zig` to prevent unsupported CUDA build steps on Apple Silicon.
+- **Zig Test Runner Cleanup**:
+  - Eliminated noisy stderr test output that caused Zig's build runner to report warnings and `failed command` messages.
+  - Assigned distinct executable names to `hk-tests` and `hk-cuda-tests`.
+- **Documentation Overhaul & GitHub Wiki**:
+  - Completely rewrote `README.md` from my personal experience, cutting out benchmark bloat and explaining my core motivation: fixing laptop bottlenecks, preventing catastrophic forgetting, and modeling neural growth after the human brain.
+  - Added full transition guides for replacing Ollama, LM Studio, llama.cpp, Unsloth, Hugging Face Transformers, and SafeTensors.
+  - Added in-depth training procedure coverage: Full Fine-Tuning (FFT), Parameter-Efficient Fine-Tuning (QLoRA), Supervised Fine-Tuning (SFT), Continued Pre-Training (CPT), and Pre-Training from scratch.
+  - Wrote a comprehensive 19-page modular GitHub Wiki in `docs/wiki/`.
+  - Built an automated GitHub Actions workflow (`.github/workflows/wiki-sync.yml`) and `tools/sync_wiki.py` for continuous wiki synchronization.
+- **Package Ecosystem**:
+  - Standardized pip package distribution name to `hknt`.
+
+---
+
 ## [1.0.0] - 2026-09-14 - The Unified Release
 
-This release establishes the HK Neural Tensor Framework as a complete, unified replacement for legacy model formats (SafeTensors, GGUF, and PyTorch checkpoints). It packages raw unquantized weight storage with zero compute headroom, universal multi-device super-coalescing, dual-mode quantization, hardware structured sparsity, live architecture growth, and in-container evolution into a single seamless system.
+I built this initial unified release of the HK Neural Tensor Framework to serve as a complete replacement for legacy model formats (SafeTensors, GGUF, and PyTorch checkpoints). I packaged raw unquantized weight storage with zero compute headroom, universal multi-device super-coalescing, dual-mode quantization, hardware structured sparsity, live architecture growth, and in-container evolution into a single seamless system.
 
 ### Core Container & Hardware Acceleration
 - **High-Performance CUDA GPU Backend & Dynamic Offloading (`-Dcuda=true`)**:

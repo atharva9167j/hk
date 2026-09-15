@@ -1,0 +1,47 @@
+name: Sync Wiki
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'docs/wiki/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-wiki:
+    name: Sync docs/wiki to GitHub Wiki
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Push to GitHub Wiki
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          WIKI_REPO="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.wiki.git"
+          CLONE_DIR="temp_wiki_clone"
+
+          echo "Attempting to clone GitHub Wiki repository..."
+          if git clone "$WIKI_REPO" "$CLONE_DIR"; then
+            echo "Wiki repository cloned successfully."
+            cp docs/wiki/*.md "$CLONE_DIR/"
+            cd "$CLONE_DIR"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .
+            if git diff-index --quiet HEAD; then
+              echo "No documentation changes to commit. Wiki is up to date."
+            else
+              git commit -m "Auto-sync documentation from docs/wiki/"
+              git push origin master || git push origin main
+              echo "GitHub Wiki updated successfully."
+            fi
+          else
+            echo "Notice: Could not clone wiki repository."
+            echo "If the wiki has never been initialized on GitHub, create at least one page via the GitHub UI first."
+          fi
