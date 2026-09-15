@@ -16,11 +16,12 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, command, "run")) {
         const file_path = it.next() orelse {
-            std.debug.print("Error: Missing file path for 'run'\nUsage: hk run <model.hk> [-p \"prompt\"] [-n 128] [--temp 0.7]\n", .{});
+            std.debug.print("Error: Missing file path for 'run'\nUsage: hk run <model.hk> [-p \"prompt\"] [-n 128] [-ngl 32] [--temp 0.7]\n", .{});
             return;
         };
         var prompt_opt: ?[]const u8 = null;
         var max_tokens: usize = 128;
+        var gpu_layers: ?usize = null;
         var params = hk.sampling.SamplingParams{};
 
         while (it.next()) |flag| {
@@ -29,6 +30,9 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, flag, "-n") or std.mem.eql(u8, flag, "--max-tokens")) {
                 const val_str = it.next() orelse break;
                 max_tokens = std.fmt.parseInt(usize, val_str, 10) catch 128;
+            } else if (std.mem.eql(u8, flag, "-ngl") or std.mem.eql(u8, flag, "--gpu-layers")) {
+                const val_str = it.next() orelse break;
+                gpu_layers = std.fmt.parseInt(usize, val_str, 10) catch null;
             } else if (std.mem.eql(u8, flag, "--temp")) {
                 const val_str = it.next() orelse break;
                 params.temperature = std.fmt.parseFloat(f32, val_str) catch 0.7;
@@ -46,20 +50,24 @@ pub fn main(init: std.process.Init) !void {
                 params.repetition_penalty = std.fmt.parseFloat(f32, val_str) catch 1.1;
             }
         }
-        try cmdRun(file_path, prompt_opt, max_tokens, params, allocator);
+        try cmdRun(file_path, prompt_opt, max_tokens, params, gpu_layers, allocator);
     } else if (std.mem.eql(u8, command, "chat")) {
         const file_path = it.next() orelse {
-            std.debug.print("Error: Missing file path for 'chat'\nUsage: hk chat <model.hk> [--temp 0.7]\n", .{});
+            std.debug.print("Error: Missing file path for 'chat'\nUsage: hk chat <model.hk> [-ngl 32] [--temp 0.7]\n", .{});
             return;
         };
         var params = hk.sampling.SamplingParams{};
+        var gpu_layers: ?usize = null;
         while (it.next()) |flag| {
-            if (std.mem.eql(u8, flag, "--temp")) {
+            if (std.mem.eql(u8, flag, "-ngl") or std.mem.eql(u8, flag, "--gpu-layers")) {
+                const val_str = it.next() orelse break;
+                gpu_layers = std.fmt.parseInt(usize, val_str, 10) catch null;
+            } else if (std.mem.eql(u8, flag, "--temp")) {
                 const val_str = it.next() orelse break;
                 params.temperature = std.fmt.parseFloat(f32, val_str) catch 0.7;
             }
         }
-        try cmdChat(file_path, params, allocator);
+        try cmdChat(file_path, params, gpu_layers, allocator);
     } else if (std.mem.eql(u8, command, "tokenize")) {
         const file_path = it.next() orelse {
             std.debug.print("Error: Missing file path for 'tokenize'\nUsage: hk tokenize <model.hk> \"text\"\n", .{});
@@ -1345,6 +1353,7 @@ fn cmdRun(
     prompt_opt: ?[]const u8,
     max_tokens: usize,
     params: hk.sampling.SamplingParams,
+    gpu_layers: ?usize,
     allocator: std.mem.Allocator,
 ) !void {
     const prompt = prompt_opt orelse "Hello! Tell me who you are and what you can do.";
@@ -1361,12 +1370,18 @@ fn cmdRun(
     tok.loadFromMetadata(&reader.metadata_map) catch {};
 
     std.debug.print("Initializing native inference engine...\n", .{});
-    var engine = hk.inference.TransformerEngine.initFromReader(allocator, &reader) catch |err| {
+    var engine = hk.inference.TransformerEngine.initFromReaderWithOptions(allocator, &reader, .{ .gpu_layers = gpu_layers }) catch |err| {
         std.debug.print("Error initializing transformer engine: {}\n", .{err});
         return;
     };
     defer engine.deinit();
     defer allocator.destroy(engine);
+
+    if (engine.n_gpu_layers > 0) {
+        std.debug.print("Device offload active: {}/{} layers offloaded to GPU\n", .{ engine.n_gpu_layers, engine.config.n_layers });
+    } else {
+        std.debug.print("Running on CPU: {} layers\n", .{engine.config.n_layers});
+    }
 
     var prompt_tokens: std.ArrayList(u32) = .empty;
     defer prompt_tokens.deinit(allocator);
@@ -1429,6 +1444,7 @@ fn cmdRun(
 fn cmdChat(
     model_path: []const u8,
     params: hk.sampling.SamplingParams,
+    gpu_layers: ?usize,
     allocator: std.mem.Allocator,
 ) !void {
     std.debug.print("Loading model: {s}...\n", .{model_path});
@@ -1442,12 +1458,18 @@ fn cmdChat(
     defer tok.deinit();
     tok.loadFromMetadata(&reader.metadata_map) catch {};
 
-    var engine = hk.inference.TransformerEngine.initFromReader(allocator, &reader) catch |err| {
+    var engine = hk.inference.TransformerEngine.initFromReaderWithOptions(allocator, &reader, .{ .gpu_layers = gpu_layers }) catch |err| {
         std.debug.print("Error initializing transformer engine: {}\n", .{err});
         return;
     };
     defer engine.deinit();
     defer allocator.destroy(engine);
+
+    if (engine.n_gpu_layers > 0) {
+        std.debug.print("Device offload active: {}/{} layers offloaded to GPU\n", .{ engine.n_gpu_layers, engine.config.n_layers });
+    } else {
+        std.debug.print("Running on CPU: {} layers\n", .{engine.config.n_layers});
+    }
 
     std.debug.print("HK Chat REPL (Interactive Native Zig Transformer Inference)\nType 'exit' or 'quit' to end.\n\n", .{});
 

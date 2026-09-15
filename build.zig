@@ -34,21 +34,27 @@ pub fn build(b: *std.Build) void {
     // graph propagates its object files/library links to whatever links it in
     // -- attaching this a second time on a dependent module duplicates symbols.
     if (cuda_enabled) {
+        const is_windows = target.result.os.tag == .windows;
         const nvcc = b.addSystemCommand(&.{
             "nvcc",
             "-O3",
             "-arch=native",
             "--compiler-options",
-            "-fPIC",
+            if (is_windows) "/MD" else "-fPIC",
             "-c",
             "src/cuda/hk_cuda.cu",
             "-o",
         });
-        const obj_path = nvcc.addOutputFileArg("hk_cuda.o");
+        const obj_path = nvcc.addOutputFileArg(if (is_windows) "hk_cuda.obj" else "hk_cuda.o");
         hk_mod.addObjectFile(obj_path);
-        hk_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/targets/x86_64-linux/lib", .{cuda_path}) });
-        hk_mod.linkSystemLibrary("cudart", .{});
-        hk_mod.linkSystemLibrary("stdc++", .{});
+        if (is_windows) {
+            hk_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib/x64", .{cuda_path}) });
+            hk_mod.linkSystemLibrary("cudart", .{});
+        } else {
+            hk_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/targets/x86_64-linux/lib", .{cuda_path}) });
+            hk_mod.linkSystemLibrary("cudart", .{});
+            hk_mod.linkSystemLibrary("stdc++", .{});
+        }
     }
 
     // Shared Library (DLL / .so / .dylib) for C ABI bindings (Python ctypes, C#, etc.)

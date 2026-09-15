@@ -25,7 +25,7 @@ test "cuda gemv f32 matches cpu reference" {
     var prng = std.Random.DefaultPrng.init(42);
     const rand = prng.random();
 
-    const M: usize = 37; // deliberately not a round number
+    const M: usize = 37;
     const K: usize = 129;
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -68,7 +68,7 @@ test "cuda gemv q8_0 matches cpu reference" {
     const rand = prng.random();
 
     const M: usize = 11;
-    const K: usize = 256; // 8 blocks of 32
+    const K: usize = 256;
     const blocks_per_row = K / 32;
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -117,4 +117,86 @@ test "cuda gemv q8_0 matches cpu reference" {
         try std.testing.expectApproxEqAbs(cv, gv, 0.05);
     }
     std.debug.print("[cuda] gemv q8_0: M={d} K={d} row0_cpu={d:.4} row0_gpu={d:.4} -- OK\n", .{ M, K, y_cpu[0], y_gpu[0] });
+}
+
+test "cuda rmsnorm matches cpu reference" {
+    var prng = std.Random.DefaultPrng.init(101);
+    const rand = prng.random();
+
+    const dim: usize = 256;
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const x = try allocator.alloc(f32, dim);
+    defer allocator.free(x);
+    const w = try allocator.alloc(f32, dim);
+    defer allocator.free(w);
+    for (x) |*v| v.* = rand.float(f32) * 2.0 - 1.0;
+    for (w) |*v| v.* = rand.float(f32) * 2.0 - 1.0;
+
+    const out_cpu = try allocator.alloc(f32, dim);
+    defer allocator.free(out_cpu);
+    tensor_ops.rmsNormF32(x, w, 1e-5, out_cpu);
+
+    const d_x = try cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(x));
+    defer d_x.free();
+    const d_w = try cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(w));
+    defer d_w.free();
+    const d_out = try cuda.DeviceBuffer.allocUninit(dim * @sizeOf(f32));
+    defer d_out.free();
+
+    try cuda.rmsNorm(d_x, d_w, d_out, dim, 1e-5);
+    try cuda.synchronize();
+
+    const out_gpu = try allocator.alloc(f32, dim);
+    defer allocator.free(out_gpu);
+    try d_out.download(std.mem.sliceAsBytes(out_gpu));
+
+    for (out_cpu, out_gpu) |cv, gv| {
+        try std.testing.expectApproxEqAbs(cv, gv, 1e-3);
+    }
+    std.debug.print("[cuda] rmsnorm: dim={d} -- OK\n", .{dim});
+}
+
+test "cuda swiglu matches reference" {
+    var prng = std.Random.DefaultPrng.init(202);
+    const rand = prng.random();
+
+    const hidden_dim: usize = 128;
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const gate = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(gate);
+    const up = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(up);
+    const ref = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(ref);
+
+    for (0..hidden_dim) |i| {
+        gate[i] = rand.float(f32) * 2.0 - 1.0;
+        up[i] = rand.float(f32) * 2.0 - 1.0;
+        const g = gate[i];
+        const silu = g / (1.0 + @exp(-g));
+        ref[i] = silu * up[i];
+    }
+
+    const d_gate = try cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(gate));
+    defer d_gate.free();
+    const d_up = try cuda.DeviceBuffer.upload(std.mem.sliceAsBytes(up));
+    defer d_up.free();
+
+    try cuda.swiglu(d_gate, d_up, hidden_dim);
+    try cuda.synchronize();
+
+    const out_gpu = try allocator.alloc(f32, hidden_dim);
+    defer allocator.free(out_gpu);
+    try d_gate.download(std.mem.sliceAsBytes(out_gpu));
+
+    for (ref, out_gpu) |rv, gv| {
+        try std.testing.expectApproxEqAbs(rv, gv, 1e-4);
+    }
+    std.debug.print("[cuda] swiglu: dim={d} -- OK\n", .{hidden_dim});
 }
