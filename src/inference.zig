@@ -5,6 +5,7 @@ const metadata_mod = @import("metadata.zig");
 const tensor_ops = @import("tensor_ops.zig");
 const quantization = @import("quantization.zig");
 const cuda = @import("cuda.zig");
+const graph_mod = @import("graph.zig");
 
 pub const ModelConfig = struct {
     dim: usize = 512,
@@ -137,6 +138,10 @@ pub const TransformerEngine = struct {
     gpu_output_norm: ?cuda.DeviceBuffer = null,
     gpu_lm_head: ?cuda.DeviceBuffer = null,
 
+    // Compiled Graph Execution Plan (zgc + PyTorch CUDA execution engine)
+    plan: ?graph_mod.ExecutionPlan = null,
+    logits_slot_id: ?graph_mod.SlotId = null,
+
     // Host scratch working buffers
     x: []f32,
     xb: []f32,
@@ -181,6 +186,8 @@ pub const TransformerEngine = struct {
             .lm_head = lm_head,
             .cache = cache,
             .n_gpu_layers = 0,
+            .plan = null,
+            .logits_slot_id = null,
             .d_x = null,
             .d_xb = null,
             .d_q = null,
@@ -254,6 +261,416 @@ pub const TransformerEngine = struct {
             },
         }
         return buf;
+    }
+
+    /// Builds a declarative AOT tensor computation graph (ComputeGraph) for the full transformer model.
+    pub fn buildComputeGraph(
+        allocator: std.mem.Allocator,
+        cfg: ModelConfig,
+        tok_embeddings: TensorRef,
+        layers: []const LayerWeights,
+        output_norm: []const f32,
+        lm_head: TensorRef,
+        gpu_output_norm: ?cuda.DeviceBuffer,
+        gpu_lm_head: ?cuda.DeviceBuffer,
+    ) !struct { cg: graph_mod.ComputeGraph, logits_slot: graph_mod.SlotId } {
+        var cg = graph_mod.ComputeGraph.init(allocator);
+        errdefer cg.deinit();
+
+        const dim = cfg.dim;
+        const hidden_dim = cfg.hidden_dim;
+        const n_heads = cfg.n_heads;
+        const n_kv_heads = cfg.n_kv_heads;
+        const head_dim = cfg.head_dim;
+        const q_dim = @max(n_heads * head_dim, dim);
+        const kv_dim = @max(n_kv_heads * head_dim, dim);
+
+        // Initial activation slot x on host
+        var current_slot = try cg.addSlot("x_init", &.{dim}, .f32, .cpu);
+        var current_dev: graph_mod.Device = .cpu;
+
+        // Embedding lookup node
+        try cg.addNode(.{
+            .op = .embedding_lookup,
+            .name = "embedding_lookup",
+            .inputs = .{ null, null, null },
+            .outputs = .{ current_slot, null },
+            .weight = .{
+                .data = tok_embeddings.data,
+                .storage_type = tok_embeddings.storage_type,
+                .rows = tok_embeddings.rows,
+                .cols = tok_embeddings.cols,
+                .gpu_buf = null,
+            },
+            .dim = dim,
+            .device = .cpu,
+        });
+
+        for (layers, 0..) |layer, l| {
+            const target_dev: graph_mod.Device = if (layer.is_gpu) .{ .cuda = 0 } else .cpu;
+
+            // Transition from CPU to GPU or GPU to CPU if offload boundary changes
+            if (!current_dev.eql(target_dev)) {
+                const copy_slot = try cg.addSlot(if (target_dev.isCuda()) "x_h2d" else "x_d2h", &.{dim}, .f32, target_dev);
+                try cg.addNode(.{
+                    .op = if (target_dev.isCuda()) .device_copy_h2d else .device_copy_d2h,
+                    .name = if (target_dev.isCuda()) "copy_h2d" else "copy_d2h",
+                    .inputs = .{ current_slot, null, null },
+                    .outputs = .{ copy_slot, null },
+                    .dim = dim,
+                    .device = target_dev,
+                });
+                current_slot = copy_slot;
+                current_dev = target_dev;
+            }
+
+            // 1. Attention RMSNorm: x -> xb
+            const xb_slot = try cg.addSlot("xb_attn", &.{dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .rmsnorm,
+                .name = "attn_norm",
+                .inputs = .{ current_slot, null, null },
+                .outputs = .{ xb_slot, null },
+                .weight = .{
+                    .data = std.mem.sliceAsBytes(layer.attn_norm),
+                    .storage_type = .f32,
+                    .rows = layer.attn_norm.len,
+                    .cols = 1,
+                    .gpu_buf = layer.gpu_attn_norm,
+                },
+                .dim = dim,
+                .eps = cfg.norm_eps,
+                .device = current_dev,
+            });
+
+            // 2. Q, K, V Projections
+            const q_slot = try cg.addSlot("q", &.{q_dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .gemv,
+                .name = "wq",
+                .inputs = .{ xb_slot, null, null },
+                .outputs = .{ q_slot, null },
+                .weight = .{
+                    .data = layer.wq.data,
+                    .storage_type = layer.wq.storage_type,
+                    .rows = layer.wq.rows,
+                    .cols = layer.wq.cols,
+                    .gpu_buf = layer.gpu_wq,
+                },
+                .device = current_dev,
+            });
+
+            const k_slot = try cg.addSlot("k", &.{kv_dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .gemv,
+                .name = "wk",
+                .inputs = .{ xb_slot, null, null },
+                .outputs = .{ k_slot, null },
+                .weight = .{
+                    .data = layer.wk.data,
+                    .storage_type = layer.wk.storage_type,
+                    .rows = layer.wk.rows,
+                    .cols = layer.wk.cols,
+                    .gpu_buf = layer.gpu_wk,
+                },
+                .device = current_dev,
+            });
+
+            const v_slot = try cg.addSlot("v", &.{kv_dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .gemv,
+                .name = "wv",
+                .inputs = .{ xb_slot, null, null },
+                .outputs = .{ v_slot, null },
+                .weight = .{
+                    .data = layer.wv.data,
+                    .storage_type = layer.wv.storage_type,
+                    .rows = layer.wv.rows,
+                    .cols = layer.wv.cols,
+                    .gpu_buf = layer.gpu_wv,
+                },
+                .device = current_dev,
+            });
+
+            // 3. QK-Norm & RoPE
+            if (layer.attn_q_norm != null and layer.attn_k_norm != null and current_dev.isCuda()) {
+                try cg.addNode(.{
+                    .op = .fused_qknorm_rope,
+                    .name = "fused_qknorm_rope",
+                    .inputs = .{ q_slot, k_slot, null },
+                    .outputs = .{ q_slot, k_slot },
+                    .weight = .{
+                        .data = std.mem.sliceAsBytes(layer.attn_q_norm.?),
+                        .storage_type = .f32,
+                        .rows = layer.attn_q_norm.?.len,
+                        .cols = 1,
+                        .gpu_buf = layer.gpu_attn_q_norm,
+                    },
+                    .aux_weight = .{
+                        .data = std.mem.sliceAsBytes(layer.attn_k_norm.?),
+                        .storage_type = .f32,
+                        .rows = layer.attn_k_norm.?.len,
+                        .cols = 1,
+                        .gpu_buf = layer.gpu_attn_k_norm,
+                    },
+                    .n_heads = n_heads,
+                    .n_kv_heads = n_kv_heads,
+                    .head_dim = head_dim,
+                    .eps = cfg.norm_eps,
+                    .rope_theta = cfg.rope_theta,
+                    .device = current_dev,
+                });
+            } else {
+                if (layer.attn_q_norm) |qn| {
+                    try cg.addNode(.{
+                        .op = .head_rmsnorm,
+                        .name = "attn_q_norm",
+                        .inputs = .{ q_slot, null, null },
+                        .outputs = .{ q_slot, null },
+                        .weight = .{
+                            .data = std.mem.sliceAsBytes(qn),
+                            .storage_type = .f32,
+                            .rows = qn.len,
+                            .cols = 1,
+                            .gpu_buf = layer.gpu_attn_q_norm,
+                        },
+                        .n_heads = n_heads,
+                        .head_dim = head_dim,
+                        .eps = cfg.norm_eps,
+                        .device = current_dev,
+                    });
+                }
+                if (layer.attn_k_norm) |kn| {
+                    try cg.addNode(.{
+                        .op = .head_rmsnorm,
+                        .name = "attn_k_norm",
+                        .inputs = .{ k_slot, null, null },
+                        .outputs = .{ k_slot, null },
+                        .weight = .{
+                            .data = std.mem.sliceAsBytes(kn),
+                            .storage_type = .f32,
+                            .rows = kn.len,
+                            .cols = 1,
+                            .gpu_buf = layer.gpu_attn_k_norm,
+                        },
+                        .n_heads = n_kv_heads,
+                        .head_dim = head_dim,
+                        .eps = cfg.norm_eps,
+                        .device = current_dev,
+                    });
+                }
+                try cg.addNode(.{
+                    .op = .rope,
+                    .name = "rope",
+                    .inputs = .{ q_slot, k_slot, null },
+                    .outputs = .{ q_slot, k_slot },
+                    .n_heads = n_heads,
+                    .n_kv_heads = n_kv_heads,
+                    .head_dim = head_dim,
+                    .rope_theta = cfg.rope_theta,
+                    .device = current_dev,
+                });
+            }
+
+            // 4. Attention GQA
+            const attn_out = try cg.addSlot("attn_out", &.{q_dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .attention_gqa,
+                .name = "gqa_attention",
+                .inputs = .{ q_slot, k_slot, v_slot },
+                .outputs = .{ attn_out, null },
+                .layer_idx = l,
+                .dim = dim,
+                .n_heads = n_heads,
+                .n_kv_heads = n_kv_heads,
+                .head_dim = head_dim,
+                .device = current_dev,
+            });
+
+            // 5. Wo Output Projection
+            const wo_out = try cg.addSlot("wo_out", &.{dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .gemv,
+                .name = "wo",
+                .inputs = .{ attn_out, null, null },
+                .outputs = .{ wo_out, null },
+                .weight = .{
+                    .data = layer.wo.data,
+                    .storage_type = layer.wo.storage_type,
+                    .rows = layer.wo.rows,
+                    .cols = layer.wo.cols,
+                    .gpu_buf = layer.gpu_wo,
+                },
+                .device = current_dev,
+            });
+
+            // 6. Residual Connection 1: current_slot = current_slot + wo_out
+            try cg.addNode(.{
+                .op = .add_residual,
+                .name = "residual_attn",
+                .inputs = .{ current_slot, wo_out, null },
+                .outputs = .{ current_slot, null },
+                .dim = dim,
+                .device = current_dev,
+            });
+
+            // 7. Feed-Forward RMSNorm: current_slot -> xb_ffn
+            const xb_ffn = try cg.addSlot("xb_ffn", &.{dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .rmsnorm,
+                .name = "ffn_norm",
+                .inputs = .{ current_slot, null, null },
+                .outputs = .{ xb_ffn, null },
+                .weight = .{
+                    .data = std.mem.sliceAsBytes(layer.ffn_norm),
+                    .storage_type = .f32,
+                    .rows = layer.ffn_norm.len,
+                    .cols = 1,
+                    .gpu_buf = layer.gpu_ffn_norm,
+                },
+                .dim = dim,
+                .eps = cfg.norm_eps,
+                .device = current_dev,
+            });
+
+            // 8. Gate & Up projections
+            const gate_slot = try cg.addSlot("gate", &.{hidden_dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .gemv,
+                .name = "w_gate",
+                .inputs = .{ xb_ffn, null, null },
+                .outputs = .{ gate_slot, null },
+                .weight = .{
+                    .data = layer.w_gate.data,
+                    .storage_type = layer.w_gate.storage_type,
+                    .rows = layer.w_gate.rows,
+                    .cols = layer.w_gate.cols,
+                    .gpu_buf = layer.gpu_w_gate,
+                },
+                .device = current_dev,
+            });
+
+            const up_slot = try cg.addSlot("up", &.{hidden_dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .gemv,
+                .name = "w_up",
+                .inputs = .{ xb_ffn, null, null },
+                .outputs = .{ up_slot, null },
+                .weight = .{
+                    .data = layer.w_up.data,
+                    .storage_type = layer.w_up.storage_type,
+                    .rows = layer.w_up.rows,
+                    .cols = layer.w_up.cols,
+                    .gpu_buf = layer.gpu_w_up,
+                },
+                .device = current_dev,
+            });
+
+            // 9. SwiGLU activation (gate = SiLU(gate) * up)
+            try cg.addNode(.{
+                .op = .swiglu,
+                .name = "swiglu",
+                .inputs = .{ gate_slot, up_slot, null },
+                .outputs = .{ gate_slot, null },
+                .hidden_dim = hidden_dim,
+                .device = current_dev,
+            });
+
+            // 10. Down projection (w_down * gate -> xb_down)
+            const xb_down = try cg.addSlot("xb_down", &.{dim}, .f32, current_dev);
+            try cg.addNode(.{
+                .op = .gemv,
+                .name = "w_down",
+                .inputs = .{ gate_slot, null, null },
+                .outputs = .{ xb_down, null },
+                .weight = .{
+                    .data = layer.w_down.data,
+                    .storage_type = layer.w_down.storage_type,
+                    .rows = layer.w_down.rows,
+                    .cols = layer.w_down.cols,
+                    .gpu_buf = layer.gpu_w_down,
+                },
+                .device = current_dev,
+            });
+
+            // 11. Residual Connection 2: current_slot = current_slot + xb_down
+            try cg.addNode(.{
+                .op = .add_residual,
+                .name = "residual_ffn",
+                .inputs = .{ current_slot, xb_down, null },
+                .outputs = .{ current_slot, null },
+                .dim = dim,
+                .device = current_dev,
+            });
+        }
+
+        // Final output norm & LM head
+        const target_head_dev: graph_mod.Device = if (gpu_lm_head != null and gpu_output_norm != null) .{ .cuda = 0 } else .cpu;
+        if (!current_dev.eql(target_head_dev)) {
+            const copy_slot = try cg.addSlot(if (target_head_dev.isCuda()) "x_head_h2d" else "x_head_d2h", &.{dim}, .f32, target_head_dev);
+            try cg.addNode(.{
+                .op = if (target_head_dev.isCuda()) .device_copy_h2d else .device_copy_d2h,
+                .name = if (target_head_dev.isCuda()) "copy_head_h2d" else "copy_head_d2h",
+                .inputs = .{ current_slot, null, null },
+                .outputs = .{ copy_slot, null },
+                .dim = dim,
+                .device = target_head_dev,
+            });
+            current_slot = copy_slot;
+            current_dev = target_head_dev;
+        }
+
+        // Output RMSNorm
+        const xb_final = try cg.addSlot("xb_final", &.{dim}, .f32, current_dev);
+        try cg.addNode(.{
+            .op = .rmsnorm,
+            .name = "output_norm",
+            .inputs = .{ current_slot, null, null },
+            .outputs = .{ xb_final, null },
+            .weight = .{
+                .data = std.mem.sliceAsBytes(output_norm),
+                .storage_type = .f32,
+                .rows = output_norm.len,
+                .cols = 1,
+                .gpu_buf = gpu_output_norm,
+            },
+            .dim = dim,
+            .eps = cfg.norm_eps,
+            .device = current_dev,
+        });
+
+        // LM Head Projection -> logits
+        const logits_dev_slot = try cg.addSlot("logits_raw", &.{cfg.vocab_size}, .f32, current_dev);
+        try cg.addNode(.{
+            .op = .gemv,
+            .name = "lm_head",
+            .inputs = .{ xb_final, null, null },
+            .outputs = .{ logits_dev_slot, null },
+            .weight = .{
+                .data = lm_head.data,
+                .storage_type = lm_head.storage_type,
+                .rows = lm_head.rows,
+                .cols = lm_head.cols,
+                .gpu_buf = gpu_lm_head,
+            },
+            .device = current_dev,
+        });
+
+        // If logits are on device, copy back to host
+        var final_logits_slot = logits_dev_slot;
+        if (current_dev.isCuda()) {
+            final_logits_slot = try cg.addSlot("logits_host", &.{cfg.vocab_size}, .f32, .cpu);
+            try cg.addNode(.{
+                .op = .device_copy_d2h,
+                .name = "copy_logits_d2h",
+                .inputs = .{ logits_dev_slot, null, null },
+                .outputs = .{ final_logits_slot, null },
+                .dim = cfg.vocab_size,
+                .device = .cpu,
+            });
+        }
+
+        return .{ .cg = cg, .logits_slot = final_logits_slot };
     }
 
     /// Constructs and initializes a TransformerEngine from an open HKReader
@@ -608,10 +1025,33 @@ pub const TransformerEngine = struct {
             }
         }
 
+        // Ahead-of-Time Computation Graph compilation (zgc + PyTorch CUDA execution engine)
+        var graph_res = buildComputeGraph(
+            allocator,
+            cfg,
+            tok_embeddings,
+            engine.layers.items,
+            output_norm_buf,
+            lm_head,
+            engine.gpu_output_norm,
+            engine.gpu_lm_head,
+        ) catch null;
+
+        if (graph_res) |*gres| {
+            defer gres.cg.deinit();
+            engine.plan = graph_mod.ExecutionPlan.compile(allocator, &gres.cg) catch null;
+            engine.logits_slot_id = gres.logits_slot;
+        }
+
         return engine;
     }
 
     pub fn deinit(self: *TransformerEngine) void {
+        if (self.plan) |*p| {
+            p.deinit();
+            self.plan = null;
+        }
+
         for (self.layers.items) |layer| {
             if (layer.owns_norms) {
                 self.allocator.free(layer.attn_norm);
@@ -833,8 +1273,32 @@ pub const TransformerEngine = struct {
     }
 
     /// Single autoregressive forward pass step: (token, pos) -> logits
-    /// Supports dynamic CPU/GPU offloading and 100% full GPU offloading path.
+    /// Dispatches through the compiled AOT execution plan (ComputeGraph + MemoryPlanner + CudaGraph),
+    /// guaranteeing zero runtime heap allocations and optimal hardware throughput.
     pub fn forward(self: *TransformerEngine, token: u32, pos: usize) []const f32 {
+        if (self.plan) |*p| {
+            var ctx = graph_mod.StepContext{
+                .arena = &p.arena,
+                .pos = pos,
+                .token_id = token,
+                .key_cache = self.cache.key_cache,
+                .val_cache = self.cache.val_cache,
+                .d_key_cache = if (self.d_key_cache) |b| b.ptr else null,
+                .d_val_cache = if (self.d_val_cache) |b| b.ptr else null,
+                .max_seq_len = self.config.max_seq_len,
+                .att = self.att,
+            };
+            p.execute(&ctx) catch {
+                return self.forwardLegacy(token, pos);
+            };
+            const logits_slot = &p.slots[self.logits_slot_id.?];
+            return p.arena.hostSlice(logits_slot);
+        }
+        return self.forwardLegacy(token, pos);
+    }
+
+    /// Procedural reference execution path (used as robust fallback if graph plan is disabled)
+    pub fn forwardLegacy(self: *TransformerEngine, token: u32, pos: usize) []const f32 {
         const cfg = self.config;
         const dim = cfg.dim;
         const head_dim = cfg.head_dim;

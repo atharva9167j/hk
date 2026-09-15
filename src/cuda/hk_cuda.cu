@@ -534,4 +534,118 @@ int hk_cuda_add_residual(float* d_x, const float* d_residual, int dim) {
     return (int)cudaGetLastError();
 }
 
+// ---------------------------------------------------------------------
+// CUDA Streams & Events
+// ---------------------------------------------------------------------
+int hk_cuda_stream_create(void** p_stream) {
+    cudaStream_t stream;
+    cudaError_t err = cudaStreamCreate(&stream);
+    if (err != cudaSuccess) return (int)err;
+    *p_stream = (void*)stream;
+    return 0;
+}
+
+int hk_cuda_stream_destroy(void* stream) {
+    if (!stream) return 0;
+    return (int)cudaStreamDestroy((cudaStream_t)stream);
+}
+
+int hk_cuda_stream_synchronize(void* stream) {
+    return (int)cudaStreamSynchronize((cudaStream_t)stream);
+}
+
+int hk_cuda_event_create(void** p_event) {
+    cudaEvent_t evt;
+    cudaError_t err = cudaEventCreate(&evt);
+    if (err != cudaSuccess) return (int)err;
+    *p_event = (void*)evt;
+    return 0;
+}
+
+int hk_cuda_event_destroy(void* event) {
+    if (!event) return 0;
+    return (int)cudaEventDestroy((cudaEvent_t)event);
+}
+
+int hk_cuda_event_record(void* event, void* stream) {
+    return (int)cudaEventRecord((cudaEvent_t)event, (cudaStream_t)stream);
+}
+
+int hk_cuda_event_synchronize(void* event) {
+    return (int)cudaEventSynchronize((cudaEvent_t)event);
+}
+
+float hk_cuda_event_elapsed_ms(void* start_evt, void* end_evt) {
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, (cudaEvent_t)start_evt, (cudaEvent_t)end_evt);
+    return ms;
+}
+
+// ---------------------------------------------------------------------
+// CUDA Hardware Graphs (Capture, Instantiate, Launch)
+// ---------------------------------------------------------------------
+int hk_cuda_graph_begin_capture(void* stream) {
+    return (int)cudaStreamBeginCapture((cudaStream_t)stream, cudaStreamCaptureModeGlobal);
+}
+
+int hk_cuda_graph_end_capture(void* stream, void** p_graph) {
+    cudaGraph_t graph;
+    cudaError_t err = cudaStreamEndCapture((cudaStream_t)stream, &graph);
+    if (err != cudaSuccess) return (int)err;
+    *p_graph = (void*)graph;
+    return 0;
+}
+
+int hk_cuda_graph_instantiate(void** p_exec, void* graph) {
+    cudaGraphExec_t exec;
+    cudaError_t err = cudaGraphInstantiate(&exec, (cudaGraph_t)graph, nullptr, nullptr, 0);
+    if (err != cudaSuccess) return (int)err;
+    *p_exec = (void*)exec;
+    return 0;
+}
+
+int hk_cuda_graph_launch(void* exec, void* stream) {
+    return (int)cudaGraphLaunch((cudaGraphExec_t)exec, (cudaStream_t)stream);
+}
+
+int hk_cuda_graph_destroy(void* graph) {
+    if (!graph) return 0;
+    return (int)cudaGraphDestroy((cudaGraph_t)graph);
+}
+
+int hk_cuda_graph_exec_destroy(void* exec) {
+    if (!exec) return 0;
+    return (int)cudaGraphExecDestroy((cudaGraphExec_t)exec);
+}
+
+// ---------------------------------------------------------------------
+// Fused Kernels
+// ---------------------------------------------------------------------
+int hk_cuda_fused_qknorm_rope(float* d_q, float* d_k, const float* d_wq, const float* d_wk,
+                              int pos, int n_heads, int n_kv_heads, int head_dim,
+                              int w_len_q, int w_len_k, float eps, float rope_theta) {
+    const int threads = 128;
+    if (d_wq) {
+        headRmsNormKernel<<<n_heads, threads>>>(d_q, d_wq, n_heads, head_dim, w_len_q, eps);
+    }
+    if (d_wk) {
+        headRmsNormKernel<<<n_kv_heads, threads>>>(d_k, d_wk, n_kv_heads, head_dim, w_len_k, eps);
+    }
+    const int half_dim = head_dim / 2;
+    const int max_heads = (n_heads > n_kv_heads) ? n_heads : n_kv_heads;
+    ropeKernel<<<max_heads, half_dim>>>(d_q, d_k, pos, n_heads, n_kv_heads, head_dim, rope_theta);
+    return (int)cudaGetLastError();
+}
+
+int hk_cuda_fused_swiglu_residual(float* d_gate, const float* d_up, const float* d_residual, int hidden_dim, int dim) {
+    const int threads = 256;
+    const int blocks = (hidden_dim + threads - 1) / threads;
+    swigluKernel<<<blocks, threads>>>(d_gate, d_up, hidden_dim);
+    if (d_residual && dim > 0) {
+        const int r_blocks = (dim + threads - 1) / threads;
+        addResidualKernel<<<r_blocks, threads>>>(d_gate, d_residual, dim);
+    }
+    return (int)cudaGetLastError();
+}
+
 } // extern "C"
