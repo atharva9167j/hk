@@ -8,7 +8,7 @@ I built HK as a high-performance neural framework and unified binary container f
 
 Instead of treating neural networks as frozen, immutable files on disk, I created HK to provide a living architecture that can widen its layers, learn new domains, and adapt over time without catastrophic forgetting.
 
-I have written comprehensive documentation and deep dives in the [HK GitHub Wiki](docs/README.md).
+I have written comprehensive documentation and deep dives in the [HK GitHub Wiki](https://github.com/harshitkhandelwal208/hk/wiki).
 
 ---
 
@@ -291,7 +291,7 @@ I evaluated HK on a production model with 873,438,784 bfloat16 parameters (488 t
 | **Process Startup Latency** | 4,880 ms (Python runtime) | **53.9 ms (Native `hk`)** | **90.4x faster startup** |
 | **Ampere 2:4 Structured Sparsity**| None (1.00x) | **1.88x physical compression** | **0.000000 error (bit-exact)** |
 
-For full empirical benchmarks, physical page fault profiling, memory bus measurements, and quantization tradeoffs, see the [Benchmarks and Performance Guide](docs/wiki/Benchmarks-and-Performance.md).
+For full empirical benchmarks, physical page fault profiling, memory bus measurements, and quantization tradeoffs, see the [Benchmarks and Performance Guide](https://github.com/harshitkhandelwal208/hk/wiki/Benchmarks-and-Performance).
 
 ---
 
@@ -311,25 +311,25 @@ I built native, zero-overhead bindings across 7 programming environments:
 
 ## Documentation & Wiki
 
-I have written detailed guides in the [docs/wiki/](docs/wiki/) directory:
+I have written detailed guides in the [HK GitHub Wiki](https://github.com/harshitkhandelwal208/hk/wiki):
 
-- [Wiki Home](docs/wiki/Home.md)
-- [Getting Started Guide](docs/wiki/Getting-Started.md)
-- [Transition Guide](docs/wiki/Transition-Guide.md)
-- [Architecture and Ideology](docs/wiki/Architecture-and-Ideology.md)
-- [Format Specification](docs/wiki/Format-Specification.md)
-- [Raw Storage and Super-Coalescing](docs/wiki/Raw-Storage-and-Super-Coalescing.md)
-- [Dynamic Architecture Growth](docs/wiki/Dynamic-Architecture-Growth.md)
-- [Training and Fine-Tuning: FFT, QLoRA, SFT](docs/wiki/Training-and-Fine-Tuning.md)
-- [Autonomous Self-Training](docs/wiki/Autonomous-Self-Training.md)
-- [In-Container Version Lineage](docs/wiki/In-Container-Version-Lineage.md)
-- [Inference and Serving](docs/wiki/Inference-and-Serving.md)
-- [Storage Innovations and Sparsity](docs/wiki/Storage-and-Sparsity.md)
-- [CLI Reference Manual](docs/wiki/CLI-Reference.md)
-- [Python API Reference](docs/wiki/Python-API-Reference.md)
-- [Multi-Language SDKs](docs/wiki/Multi-Language-SDKs.md)
-- [Empirical Benchmarks](docs/wiki/Benchmarks-and-Performance.md)
-- [FAQ and Troubleshooting](docs/wiki/FAQ-and-Troubleshooting.md)
+- [Wiki Home](https://github.com/harshitkhandelwal208/hk/wiki)
+- [Getting Started Guide](https://github.com/harshitkhandelwal208/hk/wiki/Getting-Started)
+- [Transition Guide](https://github.com/harshitkhandelwal208/hk/wiki/Transition-Guide)
+- [Architecture and Ideology](https://github.com/harshitkhandelwal208/hk/wiki/Architecture-and-Ideology)
+- [Format Specification](https://github.com/harshitkhandelwal208/hk/wiki/Format-Specification)
+- [Raw Storage and Super-Coalescing](https://github.com/harshitkhandelwal208/hk/wiki/Raw-Storage-and-Super-Coalescing)
+- [Dynamic Architecture Growth](https://github.com/harshitkhandelwal208/hk/wiki/Dynamic-Architecture-Growth)
+- [Training and Fine-Tuning: FFT, QLoRA, SFT](https://github.com/harshitkhandelwal208/hk/wiki/Training-and-Fine-Tuning)
+- [Autonomous Self-Training](https://github.com/harshitkhandelwal208/hk/wiki/Autonomous-Self-Training)
+- [In-Container Version Lineage](https://github.com/harshitkhandelwal208/hk/wiki/In-Container-Version-Lineage)
+- [Inference and Serving](https://github.com/harshitkhandelwal208/hk/wiki/Inference-and-Serving)
+- [Storage Innovations and Sparsity](https://github.com/harshitkhandelwal208/hk/wiki/Storage-and-Sparsity)
+- [CLI Reference Manual](https://github.com/harshitkhandelwal208/hk/wiki/CLI-Reference)
+- [Python API Reference](https://github.com/harshitkhandelwal208/hk/wiki/Python-API-Reference)
+- [Multi-Language SDKs](https://github.com/harshitkhandelwal208/hk/wiki/Multi-Language-SDKs)
+- [Empirical Benchmarks](https://github.com/harshitkhandelwal208/hk/wiki/Benchmarks-and-Performance)
+- [FAQ and Troubleshooting](https://github.com/harshitkhandelwal208/hk/wiki/FAQ-and-Troubleshooting)
 
 ---
 
