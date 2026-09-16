@@ -1,9 +1,7 @@
 # HK Neural Tensor Framework
 
-[![Version](https://img.shields.io/badge/Version-1.0.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.0.3-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Python%20Tests-82%2F82%20Passing-brightgreen.svg)](tests/)
-[![Native Tests](https://img.shields.io/badge/Zig%20Tests-49%2F49%20Passing-brightgreen.svg)](tests/)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android-purple.svg)](bindings/)
 
 I built HK as a high-performance neural framework and unified binary container format (`.hk`) for continuous model evolution, dynamic architecture growth, fast local training, and zero-overhead storage across every type of hardware.
@@ -14,7 +12,7 @@ I have written comprehensive documentation and deep dives in the [HK GitHub Wiki
 
 ---
 
-## Why I Built HK: The Story and Motivation
+## Why I Built HK
 
 I started building HK out of sheer frustration late one night sitting with my laptop.
 

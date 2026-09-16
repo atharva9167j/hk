@@ -3,7 +3,7 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <PackageId>hknt</PackageId>
-    <Version>1.0.2</Version>
+    <Version>1.0.3</Version>
     <Authors>HK AI Research Team</Authors>
     <Company>HK AI</Company>
     <Description>C# / .NET bindings for HK neural tensor format and SIMD execution.</Description>

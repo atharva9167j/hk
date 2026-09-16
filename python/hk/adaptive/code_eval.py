@@ -54,7 +54,7 @@ class CodeSandbox:
         self,
         timeout_sec: float = 3.0,
         python_executable: Optional[str] = None,
-        use_docker: bool = True,
+        use_docker: bool = False,
         docker_image: str = "python:3.10-slim",
         memory_limit: str = "256m",
         cpu_limit: float = 1.0,
@@ -72,8 +72,15 @@ class CodeSandbox:
         if not docker_path:
             return False
         try:
-            res = subprocess.run([docker_path, "--version"], capture_output=True, timeout=1.5)
-            return res.returncode == 0
+            res = subprocess.run([docker_path, "info"], capture_output=True, timeout=2.0)
+            if res.returncode != 0:
+                return False
+            inspect_res = subprocess.run(
+                [docker_path, "image", "inspect", self.docker_image],
+                capture_output=True,
+                timeout=2.0
+            )
+            return inspect_res.returncode == 0
         except Exception:
             return False
 
@@ -135,6 +142,7 @@ except Exception as _e:
         start_t = time.perf_counter()
         is_running_in_docker = self.use_docker and self._docker_available
 
+        proc = None
         if is_running_in_docker:
             cmd = [
                 "docker", "run", "--rm", "-i",
@@ -156,6 +164,9 @@ except Exception as _e:
                 stdout = proc.stdout
                 stderr = proc.stderr
                 return_code = proc.returncode
+                # Fallback to subprocess if Docker infrastructure error occurred (exit 125)
+                if return_code == 125 or "no matching manifest" in (stderr or ""):
+                    proc = None
             except subprocess.TimeoutExpired:
                 elapsed_ms = self.timeout_sec * 1000.0
                 return EvalResult(
@@ -168,7 +179,8 @@ except Exception as _e:
                     error_message=f"Execution timed out after {self.timeout_sec:.1f}s in Docker sandbox",
                     test_details=[]
                 )
-        else:
+
+        if proc is None:
             with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
                 tmp.write(full_script)
                 tmp_path = tmp.name

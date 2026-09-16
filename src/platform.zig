@@ -424,8 +424,10 @@ pub fn truncateFile(path: []const u8, new_size: u64, allocator: std.mem.Allocato
         const cwd = std.Io.Dir.cwd();
         var file = try cwd.openFile(io, path, .{ .mode = .read_write });
         defer file.close(io);
-        if (@hasDecl(std.posix, "ftruncate")) {
-            try std.posix.ftruncate(file.handle, new_size);
+        const rc = std.posix.system.ftruncate(file.handle, @intCast(new_size));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            else => return error.WriteFailed,
         }
     }
 }

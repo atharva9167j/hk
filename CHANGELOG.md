@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.3] - 2026-09-16 - Cross-Platform Truncation & CodeSandbox Isolation Fixes
+
+### Fixed & Enhanced
+- **POSIX In-Place File Truncation**:
+  - Corrected `truncateFile` in `src/platform.zig` to directly invoke the POSIX `std.posix.system.ftruncate` system call with errno verification, ensuring appendix rollback functions properly on Linux and macOS.
+- **CodeSandbox Isolation Robustness**:
+  - Defaulted `use_docker=False` in `CodeSandbox` to utilize fast, self-contained AST-isolated subprocess execution out of the box without requiring external Docker setup.
+  - Enhanced `_detect_docker` to verify Docker daemon connectivity via `docker info` and local image presence via `docker image inspect`.
+  - Added automatic fallback to subprocess execution when Docker infrastructure errors (e.g. error code 125, missing container manifest) occur.
+- **Documentation & Presentation**:
+  - Cleaned `README.md` by removing test passing badge tags and streamlining the narrative section heading to `Why I Built HK`.
+
+---
+
 ## [1.0.2] - 2026-09-16 - Training Robustness, True QLoRA & Cryptographic Lineage Hardening
 
 ### Added & Enhanced
