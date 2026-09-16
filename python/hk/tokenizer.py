@@ -297,6 +297,7 @@ class HKTokenizer:
         self.unk_token_id = self.vocab.get(self.unk_token, 1)
         self.bos_token_id = self.vocab.get(self.bos_token, 2)
         self.eos_token_id = self.vocab.get(self.eos_token, 3)
+        self._bpe_cache: Dict[str, List[int]] = {}
 
     @property
     def vocab_size(self) -> int:
@@ -366,30 +367,73 @@ class HKTokenizer:
         if self.bpe_ranks:
             words = re.findall(r"\S+|\s+", text)
             for w in words:
-                if w in self.vocab:
-                    tokens.append(self.vocab[w])
+                cached = self._bpe_cache.get(w)
+                if cached is not None:
+                    tokens.extend(cached)
+                elif w in self.vocab:
+                    tid = self.vocab[w]
+                    self._bpe_cache[w] = [tid]
+                    tokens.append(tid)
                 else:
                     subwords = self._bpe(w)
-                    for sw in subwords:
-                        tokens.append(self.vocab.get(sw, self.unk_token_id))
+                    w_tokens = [self.vocab.get(sw, self.unk_token_id) for sw in subwords]
+                    if len(self._bpe_cache) < 100000:
+                        self._bpe_cache[w] = w_tokens
+                    tokens.extend(w_tokens)
         else:
-            i = 0
-            while i < len(text):
-                matched = False
-                for length in range(min(32, len(text) - i), 0, -1):
-                    sub = text[i : i + length]
-                    if sub in self.vocab:
-                        tokens.append(self.vocab[sub])
-                        i += length
-                        matched = True
-                        break
-                if not matched:
-                    tokens.append(self.vocab.get(text[i], self.unk_token_id))
-                    i += 1
+            words = re.findall(r"\S+|\s+", text)
+            for w in words:
+                cached = self._bpe_cache.get(w)
+                if cached is not None:
+                    tokens.extend(cached)
+                elif w in self.vocab:
+                    tid = self.vocab[w]
+                    self._bpe_cache[w] = [tid]
+                    tokens.append(tid)
+                else:
+                    i = 0
+                    w_tokens = []
+                    while i < len(w):
+                        matched = False
+                        for length in range(min(32, len(w) - i), 0, -1):
+                            sub = w[i : i + length]
+                            if sub in self.vocab:
+                                w_tokens.append(self.vocab[sub])
+                                i += length
+                                matched = True
+                                break
+                        if not matched:
+                            w_tokens.append(self.vocab.get(w[i], self.unk_token_id))
+                            i += 1
+                    if len(self._bpe_cache) < 100000:
+                        self._bpe_cache[w] = w_tokens
+                    tokens.extend(w_tokens)
 
         if add_special_tokens:
             tokens.append(self.eos_token_id)
         return tokens
+
+    def encode_stream(
+        self,
+        text_stream: Any,
+        add_special_tokens: bool = False,
+    ):
+        """
+        High-throughput streaming encoder for large document streams and continuous feeds.
+        Yields token IDs incrementally without loading entire text chunks into memory.
+        """
+        if add_special_tokens and self.bos_token_id is not None:
+            yield self.bos_token_id
+
+        for chunk in text_stream:
+            if not chunk:
+                continue
+            chunk_tokens = self.encode(chunk, add_special_tokens=False)
+            for tid in chunk_tokens:
+                yield tid
+
+        if add_special_tokens and self.eos_token_id is not None:
+            yield self.eos_token_id
 
     def decode(self, token_ids: List[int], skip_special_tokens: bool = True) -> str:
         if getattr(self, "_native_tok", None) is not None:

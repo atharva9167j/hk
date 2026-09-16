@@ -1,6 +1,6 @@
 # HK Neural Tensor Framework
 
-[![Version](https://img.shields.io/badge/Version-1.0.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.0.4-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android-purple.svg)](bindings/)
 

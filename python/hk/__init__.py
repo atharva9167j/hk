@@ -48,6 +48,14 @@ from .native import (
     NativeHKEngine,
     convert_safetensors_to_hk,
 )
+from .offload import (
+    HardwareMemoryInspector,
+    LayerMemoryEstimator,
+    DynamicOffloadPlanner,
+    AutoDeviceDispatcher,
+    DynamicOOMGuard,
+    DeviceMemoryInfo,
+)
 from . import format
 from . import quantization
 from . import pruning
@@ -139,7 +147,7 @@ from .adaptive import (
 AutoModelForCausalLM = AutoModel
 AutoModelForSequenceClassification = AutoModel
 
-__version__ = "1.0.0"
+__version__ = "1.0.4"
 
 __all__ = [
     "HKConfig",
@@ -214,4 +222,10 @@ __all__ = [
     "to_nvidia_tensor_core",
     "native_detect_hardware",
     "native_get_optimal_alignment",
+    "HardwareMemoryInspector",
+    "LayerMemoryEstimator",
+    "DynamicOffloadPlanner",
+    "AutoDeviceDispatcher",
+    "DynamicOOMGuard",
+    "DeviceMemoryInfo",
 ]

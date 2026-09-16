@@ -226,6 +226,15 @@ class HKQuantizedLinear(nn.Module):
             raise NotImplementedError(f"Dequantize not supported for {self.storage_type}")
         return torch.stack(rows, dim=0)
 
+    def get_dequantized_weight(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        cached = getattr(self, "_cached_weight", None)
+        if cached is not None and cached.device == device and cached.dtype == dtype:
+            return cached
+        w = self.dequantize_weight().to(dtype=dtype, device=device)
+        w.requires_grad = False
+        self._cached_weight = w
+        return self._cached_weight
+
     @property
     def weight(self) -> torch.Tensor:
         """Compatibility property returning dequantized base weight (frozen / no gradient)."""
@@ -274,8 +283,8 @@ class HKQuantizedLinear(nn.Module):
                     out = out + lora_out.to(dtype=out.dtype)
                 return out
 
-        # Path using dequantized weights (supports backprop through LoRA adapters)
-        w = self.dequantize_weight().to(dtype=x.dtype, device=x.device)
+        # Fast on-device path using cached dequantized weights (eliminates CPU roundtrips during QLoRA)
+        w = self.get_dequantized_weight(x.device, x.dtype)
         out = F.linear(x, w, self.bias)
         if self.has_lora and self.lora_A is not None and self.lora_B is not None:
             x_f32 = x.to(torch.float32)
@@ -374,11 +383,23 @@ class HKPreTrainedModel(nn.Module):
         if not model_file.is_file():
             raise FileNotFoundError(f"Model file {model_file} does not exist.")
 
-        # Resolve target device
+        # Resolve target device and device map
         target_device = device
+        dynamic_map: Optional[Dict[str, str]] = None
         if device_map is not None:
-            if isinstance(device_map, str) and device_map.lower() in ("auto", "cuda"):
-                target_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            if isinstance(device_map, str) and device_map.lower() in ("auto", "dynamic", "dynamic_offload"):
+                from .offload import DynamicOffloadPlanner
+                target_device = "cpu"
+                if config is None:
+                    config = AutoConfig.from_pretrained(model_file, **kwargs)
+                dynamic_map = DynamicOffloadPlanner.create_device_map(
+                    config,
+                    torch_dtype=torch_dtype or torch.float16,
+                    max_memory=kwargs.get("max_memory", None),
+                )
+            elif isinstance(device_map, dict):
+                dynamic_map = device_map
+                target_device = "cpu"
             elif isinstance(device_map, str):
                 target_device = device_map
 
@@ -404,10 +425,35 @@ class HKPreTrainedModel(nn.Module):
         if torch_dtype is not None:
             model = model.to(dtype=torch_dtype)
 
-        if target_device != "cpu":
+        if dynamic_map is not None:
+            from .offload import AutoDeviceDispatcher
+            AutoDeviceDispatcher.apply_device_map(model, dynamic_map)
+        elif target_device != "cpu":
             model = model.to(target_device)
 
         return model
+
+    def to_dynamic_offload(
+        self,
+        safety_headroom_ratio: float = 0.0,
+        min_vram_headroom_bytes: int = 128 * 1024 * 1024,  # 128 MB buffer memory
+        max_memory: Optional[Dict[Any, Any]] = None,
+    ) -> "HKPreTrainedModel":
+        """
+        Dynamically distributes model layers across available GPUs and CPU RAM based on
+        live hardware VRAM headroom, automatically preventing CUDA Out-Of-Memory (OOM) errors.
+        """
+        from .offload import DynamicOffloadPlanner, AutoDeviceDispatcher
+        param_dtype = next(self.parameters()).dtype if list(self.parameters()) else torch.float32
+        device_map = DynamicOffloadPlanner.create_device_map(
+            self.config,
+            torch_dtype=param_dtype,
+            safety_headroom_ratio=safety_headroom_ratio,
+            min_vram_headroom_bytes=min_vram_headroom_bytes,
+            max_memory=max_memory,
+        )
+        AutoDeviceDispatcher.apply_device_map(self, device_map)
+        return self
 
     def save_pretrained(
         self,
@@ -514,21 +560,56 @@ class HKForCausalLM(HKPreTrainedModel):
         labels: Optional[torch.Tensor] = None,
     ) -> ModelOutput:
         batch_size, seq_len = input_ids.shape
+        embed_device = self.embed_tokens.weight.device
+        if input_ids.device != embed_device:
+            input_ids = input_ids.to(embed_device)
+
         hidden_states = self.embed_tokens(input_ids)
 
-        # Create causal mask if not provided
+        # Create causal mask if not provided (strictly matching hidden_states device and dtype)
         if attention_mask is None and seq_len > 1:
-            causal_mask = torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=input_ids.device), diagonal=1)
+            causal_mask = torch.triu(
+                torch.full((seq_len, seq_len), float("-inf"), device=hidden_states.device, dtype=hidden_states.dtype),
+                diagonal=1,
+            )
             attention_mask = causal_mask.view(1, 1, seq_len, seq_len)
+        elif attention_mask is not None:
+            attention_mask = attention_mask.to(dtype=hidden_states.dtype, device=hidden_states.device)
 
         for layer in self.layers:
+            try:
+                layer_dev = next(layer.parameters()).device
+            except StopIteration:
+                layer_dev = hidden_states.device
+
+            if hidden_states.device != layer_dev:
+                hidden_states = hidden_states.to(layer_dev, non_blocking=True)
+            if attention_mask is not None and attention_mask.device != layer_dev:
+                attention_mask = attention_mask.to(layer_dev, non_blocking=True)
             hidden_states = layer(hidden_states, attention_mask=attention_mask)
 
+        try:
+            norm_dev = next(self.norm.parameters()).device
+        except StopIteration:
+            norm_dev = hidden_states.device
+
+        if hidden_states.device != norm_dev:
+            hidden_states = hidden_states.to(norm_dev, non_blocking=True)
         hidden_states = self.norm(hidden_states)
+
+        try:
+            head_dev = next(self.lm_head.parameters()).device
+        except StopIteration:
+            head_dev = hidden_states.device
+
+        if hidden_states.device != head_dev:
+            hidden_states = hidden_states.to(head_dev, non_blocking=True)
         logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:
+            if labels.device != logits.device:
+                labels = labels.to(logits.device)
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss = F.cross_entropy(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
@@ -576,7 +657,7 @@ class HKForCausalLM(HKPreTrainedModel):
                 v, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
                 next_token_logits[next_token_logits < v[:, [-1]]] = -float("Inf")
             probs = F.softmax(next_token_logits, dim=-1)
-            next_token = torch.argmax(probs, dim=-1, keepdim=True)
+            next_token = torch.argmax(probs, dim=-1, keepdim=True).to(curr_ids.device)
             curr_ids = torch.cat([curr_ids, next_token], dim=-1)
         return curr_ids
 

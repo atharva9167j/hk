@@ -118,13 +118,21 @@ def pipeline(
 
     # Resolve model
     if isinstance(model, (str, Path)):
-        model_obj = AutoModel.from_pretrained(model, device=device, **kwargs)
+        if str(device).lower() in ("auto", "dynamic", "dynamic_offload"):
+            model_obj = AutoModel.from_pretrained(model, device_map="auto", **kwargs)
+        else:
+            model_obj = AutoModel.from_pretrained(model, device=device, **kwargs)
     elif isinstance(model, HKPreTrainedModel):
+        if str(device).lower() in ("auto", "dynamic", "dynamic_offload"):
+            model.to_dynamic_offload()
         model_obj = model
     else:
         # Default placeholder model
         cfg = HKConfig(model_type="causal_lm" if "gen" in task else "sequence_classification")
-        model_obj = AutoModel.from_pretrained(None, config=cfg) if False else HKForCausalLM(cfg, device=device)
+        if str(device).lower() in ("auto", "dynamic", "dynamic_offload"):
+            model_obj = HKForCausalLM(cfg, device="cpu").to_dynamic_offload()
+        else:
+            model_obj = HKForCausalLM(cfg, device=device)
 
     # Resolve tokenizer
     if isinstance(tokenizer, (str, Path)):

@@ -1622,6 +1622,7 @@ class NativeHKWriter:
         self.ptr = _LIB.hk_writer_create(ctypes.c_uint64(alignment))
         if not self.ptr:
             raise RuntimeError("Failed to create native HKWriter")
+        self._pinned_refs: List[Any] = []
 
     def __enter__(self):
         return self
@@ -1630,6 +1631,8 @@ class NativeHKWriter:
         self.close()
 
     def close(self):
+        if hasattr(self, "_pinned_refs"):
+            self._pinned_refs.clear()
         if hasattr(self, "ptr") and self.ptr:
             _LIB.hk_writer_destroy(self.ptr)
             self.ptr = None
@@ -1685,24 +1688,33 @@ class NativeHKWriter:
     ):
         if isinstance(tensor_data, torch.Tensor):
             t = tensor_data.detach().cpu().contiguous()
-            if t.dtype == torch.bfloat16:
-                b = t.view(torch.int16).numpy().tobytes()
-            elif t.numel() == 0:
-                b = b""
-            elif t.dim() == 0:
-                b = t.reshape(1).numpy().tobytes()
+            self._pinned_refs.append(t)
+            data_len = t.numel() * t.element_size()
+            if data_len == 0:
+                c_data_ptr = ctypes.cast(ctypes.c_void_p(0), ctypes.POINTER(ctypes.c_uint8))
             else:
-                b = t.numpy().tobytes()
+                c_data_ptr = ctypes.cast(ctypes.c_void_p(t.data_ptr()), ctypes.POINTER(ctypes.c_uint8))
         elif isinstance(tensor_data, np.ndarray):
-            b = np.ascontiguousarray(tensor_data).tobytes()
+            arr = np.ascontiguousarray(tensor_data)
+            self._pinned_refs.append(arr)
+            data_len = arr.nbytes
+            if data_len == 0:
+                c_data_ptr = ctypes.cast(ctypes.c_void_p(0), ctypes.POINTER(ctypes.c_uint8))
+            else:
+                c_data_ptr = ctypes.cast(ctypes.c_void_p(arr.ctypes.data), ctypes.POINTER(ctypes.c_uint8))
         elif isinstance(tensor_data, (bytes, bytearray, memoryview)):
-            b = bytes(tensor_data)
+            data_len = len(tensor_data)
+            if data_len == 0:
+                c_data_ptr = ctypes.cast(ctypes.c_void_p(0), ctypes.POINTER(ctypes.c_uint8))
+            else:
+                c_buf = (ctypes.c_uint8 * data_len).from_buffer_copy(tensor_data)
+                self._pinned_refs.append(c_buf)
+                c_data_ptr = ctypes.cast(c_buf, ctypes.POINTER(ctypes.c_uint8))
         else:
-            raise TypeError("Unsupported tensor data type")
+            raise TypeError(f"Unsupported tensor data type: {type(tensor_data)}")
 
         ndim = len(shape)
         c_shape = (ctypes.c_uint64 * 8)(*([shape[i] if i < ndim else 0 for i in range(8)]))
-        c_buf = (ctypes.c_uint8 * len(b)).from_buffer_copy(b)
 
         err = _LIB.hk_writer_add_tensor(
             self.ptr,
@@ -1712,8 +1724,8 @@ class NativeHKWriter:
             ctypes.c_uint8(sparsity_type),
             ctypes.c_uint8(ndim),
             c_shape,
-            ctypes.cast(c_buf, ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_uint64(len(b)),
+            c_data_ptr,
+            ctypes.c_uint64(data_len),
             ctypes.c_float(sparsity_ratio),
         )
         if err != 0:
@@ -1723,6 +1735,8 @@ class NativeHKWriter:
         err = _LIB.hk_writer_write_to_file(self.ptr, path.encode("utf-8"))
         if err != 0:
             raise RuntimeError(f"Failed to write HK file {path}")
+        if hasattr(self, "_pinned_refs"):
+            self._pinned_refs.clear()
 
 
 class NativeHKReader:
