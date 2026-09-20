@@ -57,8 +57,13 @@ pub fn net2Wider(
     var g_buf: [4096]usize = undefined;
     var c_buf: [4096]usize = undefined;
 
-    const g: []usize = if (new_out <= 4096) g_buf[0..new_out] else return error.OutOfMemory;
-    const c: []usize = if (old_out <= 4096) c_buf[0..old_out] else return error.OutOfMemory;
+    const g_allocated = if (new_out > 4096) try std.heap.page_allocator.alloc(usize, new_out) else null;
+    defer if (g_allocated) |buf| std.heap.page_allocator.free(buf);
+    const g = if (g_allocated) |buf| buf else g_buf[0..new_out];
+
+    const c_allocated = if (old_out > 4096) try std.heap.page_allocator.alloc(usize, old_out) else null;
+    defer if (c_allocated) |buf| std.heap.page_allocator.free(buf);
+    const c = if (c_allocated) |buf| buf else c_buf[0..old_out];
 
     @memset(c, 0);
 
@@ -203,8 +208,15 @@ pub fn net2WiderSwiGLU(
         // --- Replication Mode (Net2Wider standard capacity split) ---
         var g_buf: [8192]usize = undefined;
         var c_buf: [8192]usize = undefined;
-        const g: []usize = if (new_inter <= 8192) g_buf[0..new_inter] else return error.OutOfMemory;
-        const c: []usize = if (old_inter <= 8192) c_buf[0..old_inter] else return error.OutOfMemory;
+
+        const g_allocated = if (new_inter > 8192) try std.heap.page_allocator.alloc(usize, new_inter) else null;
+        defer if (g_allocated) |buf| std.heap.page_allocator.free(buf);
+        const g = if (g_allocated) |buf| buf else g_buf[0..new_inter];
+
+        const c_allocated = if (old_inter > 8192) try std.heap.page_allocator.alloc(usize, old_inter) else null;
+        defer if (c_allocated) |buf| std.heap.page_allocator.free(buf);
+        const c = if (c_allocated) |buf| buf else c_buf[0..old_inter];
+
         @memset(c, 0);
 
         for (0..old_inter) |i| {

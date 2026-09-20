@@ -669,7 +669,14 @@ pub const ExecutionPlan = struct {
                     const max_t = @min(ctx.pos + 1, ctx.max_seq_len);
 
                     var att_stack: [2048]f32 = undefined;
-                    const att = if (ctx.att.len >= max_t) ctx.att[0..max_t] else att_stack[0..@min(max_t, 2048)];
+                    const heap_att = if (ctx.att.len < max_t and max_t > 2048) try self.allocator.alloc(f32, max_t) else null;
+                    defer if (heap_att) |ha| self.allocator.free(ha);
+                    const att = if (ctx.att.len >= max_t)
+                        ctx.att[0..max_t]
+                    else if (heap_att) |ha|
+                        ha
+                    else
+                        att_stack[0..max_t];
 
                     for (0..n_heads) |h| {
                         if ((h + 1) * head_dim > q_slice.len or (h + 1) * head_dim > out_slice.len) break;
@@ -900,10 +907,7 @@ pub fn matVec(weight: WeightRef, in_x: []const f32, out_y: []f32) void {
             }
         },
         else => {
-            if (std.mem.isAligned(@intFromPtr(weight.data.ptr), @alignOf(f32))) {
-                const w_f32: [*]const f32 = @ptrCast(@alignCast(weight.data.ptr));
-                tensor_ops.gemvF32(w_f32[0 .. weight.rows * weight.cols], in_x, null, out_y[0..safe_rows], safe_rows, weight.cols);
-            }
+            @memset(out_y[0..safe_rows], 0.0);
         },
     }
 }

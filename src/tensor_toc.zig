@@ -22,7 +22,7 @@ pub const TensorTOC = struct {
 
     pub fn add(self: *TensorTOC, entry: format.TensorEntry) !void {
         var e = entry;
-        e.name = try self.allocator.dupe(u8, entry.name);
+        e.name = try self.allocator.dupeZ(u8, entry.name);
         errdefer self.allocator.free(e.name);
         try self.entries.append(self.allocator, e);
     }
@@ -73,7 +73,7 @@ pub const TensorTOC = struct {
         while (i < count) : (i += 1) {
             const nlen = try reader.readU16();
             const name_raw = try reader.readBytes(nlen);
-            const name = try allocator.dupe(u8, name_raw);
+            const name = try allocator.dupeZ(u8, name_raw);
             errdefer allocator.free(name);
 
             const stype_b = try reader.readU8();

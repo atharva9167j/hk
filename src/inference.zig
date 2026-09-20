@@ -1172,23 +1172,8 @@ pub const TransformerEngine = struct {
                 }
             },
             else => {
-                if (std.mem.isAligned(@intFromPtr(weight.data.ptr), @alignOf(f32))) {
-                    const w_f32: [*]const f32 = @ptrCast(@alignCast(weight.data.ptr));
-                    tensor_ops.gemvF32(w_f32[0 .. weight.rows * weight.cols], in_x, bias, out_y[0..safe_rows], safe_rows, weight.cols);
-                } else {
-                    for (0..safe_rows) |r| {
-                        var dot: f32 = 0.0;
-                        const row_offset = r * weight.cols * 4;
-                        for (0..weight.cols) |c| {
-                            const float_bytes = weight.data[row_offset + c * 4 .. row_offset + (c + 1) * 4];
-                            const f_val: f32 = @bitCast(std.mem.readInt(u32, float_bytes[0..4], .little));
-                            dot += f_val * in_x[c];
-                        }
-                        if (bias) |b| {
-                            if (r < b.len) dot += b[r];
-                        }
-                        out_y[r] = dot;
-                    }
+                for (0..safe_rows) |r| {
+                    out_y[r] = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
                 }
             },
         }

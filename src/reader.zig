@@ -93,6 +93,7 @@ pub const HKReader = struct {
     pub fn getRawF32(self: *const HKReader, entry: format.TensorEntry) ![]const f32 {
         const bytes = try self.getTensorData(entry);
         if ((bytes.len % @sizeOf(f32)) != 0) return error.InvalidByteLength;
+        if (!std.mem.isAligned(@intFromPtr(bytes.ptr), @alignOf(f32))) return error.UnalignedData;
         const count = bytes.len / @sizeOf(f32);
         return @as([*]const f32, @ptrCast(@alignCast(bytes.ptr)))[0..count];
     }
@@ -100,6 +101,7 @@ pub const HKReader = struct {
     pub fn getRawF16(self: *const HKReader, entry: format.TensorEntry) ![]const f16 {
         const bytes = try self.getTensorData(entry);
         if ((bytes.len % @sizeOf(f16)) != 0) return error.InvalidByteLength;
+        if (!std.mem.isAligned(@intFromPtr(bytes.ptr), @alignOf(f16))) return error.UnalignedData;
         const count = bytes.len / @sizeOf(f16);
         return @as([*]const f16, @ptrCast(@alignCast(bytes.ptr)))[0..count];
     }
@@ -107,6 +109,7 @@ pub const HKReader = struct {
     pub fn getRawBF16(self: *const HKReader, entry: format.TensorEntry) ![]const u16 {
         const bytes = try self.getTensorData(entry);
         if ((bytes.len % @sizeOf(u16)) != 0) return error.InvalidByteLength;
+        if (!std.mem.isAligned(@intFromPtr(bytes.ptr), @alignOf(u16))) return error.UnalignedData;
         const count = bytes.len / @sizeOf(u16);
         return @as([*]const u16, @ptrCast(@alignCast(bytes.ptr)))[0..count];
     }

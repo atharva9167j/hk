@@ -488,7 +488,21 @@ int hk_cuda_gqa_attention(const float* d_q, const float* d_key_cache, const floa
                           int head_dim, int max_seq_len, int kv_dim) {
     const int threads = 128;
     const int max_t = (pos + 1 < max_seq_len) ? (pos + 1) : max_seq_len;
-    const size_t shmem = max_t * sizeof(float);
+    const size_t shmem = (size_t)max_t * sizeof(float);
+
+    if (shmem > 48 * 1024) {
+        int dev = 0;
+        if (cudaGetDevice(&dev) == cudaSuccess) {
+            int max_shmem = 48 * 1024;
+            cudaDeviceGetAttribute(&max_shmem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+            if ((int)shmem > max_shmem) {
+                return (int)cudaErrorLaunchOutOfResources;
+            }
+            cudaFuncSetAttribute(reinterpret_cast<const void*>(gqaAttentionKernel),
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem);
+        }
+    }
+
     gqaAttentionKernel<<<n_heads, threads, shmem>>>(d_q, d_key_cache, d_val_cache, d_out, layer, pos,
                                                     n_heads, n_kv_heads, head_dim, max_seq_len, kv_dim);
     return (int)cudaGetLastError();

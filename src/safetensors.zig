@@ -135,21 +135,21 @@ pub fn transcodeSafeTensorsToHK(
             final_storage = .f32;
         } else if (std.mem.eql(u8, dtype_str, "F16")) {
             const num_f16 = raw_bytes.len / 2;
-            const f16_ptr: [*]const f16 = @ptrCast(@alignCast(raw_bytes.ptr));
             const converted = try allocator.alloc(f32, num_f16);
             f32_buf = converted;
             for (0..num_f16) |i| {
-                converted[i] = @floatCast(f16_ptr[i]);
+                const u_val = std.mem.readInt(u16, raw_bytes[i * 2 .. (i + 1) * 2][0..2], .little);
+                converted[i] = @floatCast(@as(f16, @bitCast(u_val)));
             }
             final_data = std.mem.sliceAsBytes(converted);
             final_storage = .f32;
         } else if (std.mem.eql(u8, dtype_str, "BF16")) {
             const num_bf16 = raw_bytes.len / 2;
-            const u16_ptr: [*]const u16 = @ptrCast(@alignCast(raw_bytes.ptr));
             const converted = try allocator.alloc(f32, num_bf16);
             f32_buf = converted;
             for (0..num_bf16) |i| {
-                const bits: u32 = @as(u32, u16_ptr[i]) << 16;
+                const u_val = std.mem.readInt(u16, raw_bytes[i * 2 .. (i + 1) * 2][0..2], .little);
+                const bits: u32 = @as(u32, u_val) << 16;
                 converted[i] = @bitCast(bits);
             }
             final_data = std.mem.sliceAsBytes(converted);
@@ -160,34 +160,49 @@ pub fn transcodeSafeTensorsToHK(
         var quant_buf: ?[]u8 = null;
         defer if (quant_buf) |qb| allocator.free(qb);
 
-        if (target_storage == .q8_0 and total_elements % 32 == 0 and final_storage == .f32) {
-            const num_blocks = total_elements / 32;
-            const q_bytes = try allocator.alloc(u8, num_blocks * @sizeOf(quantization.BlockQ8_0));
-            quant_buf = q_bytes;
+        var aligned_f32_buf: ?[]f32 = null;
+        defer if (aligned_f32_buf) |ab| allocator.free(ab);
 
-            const f32_slice: [*]const f32 = @ptrCast(@alignCast(final_data.ptr));
-            const blocks: [*]quantization.BlockQ8_0 = @ptrCast(@alignCast(q_bytes.ptr));
+        if ((target_storage == .q8_0 or target_storage == .q4_0) and total_elements % 32 == 0 and final_storage == .f32) {
+            const num_floats = final_data.len / @sizeOf(f32);
+            const aligned_f32: []const f32 = if (std.mem.isAligned(@intFromPtr(final_data.ptr), @alignOf(f32))) blk: {
+                const ptr: [*]const f32 = @ptrCast(@alignCast(final_data.ptr));
+                break :blk ptr[0..num_floats];
+            } else blk: {
+                const copy = try allocator.alloc(f32, num_floats);
+                aligned_f32_buf = copy;
+                for (0..num_floats) |i| {
+                    const u = std.mem.readInt(u32, final_data[i * 4 .. (i + 1) * 4][0..4], .little);
+                    copy[i] = @bitCast(u);
+                }
+                break :blk copy;
+            };
 
-            for (0..num_blocks) |b| {
-                quantization.quantizeBlockQ8_0(f32_slice[b * 32 .. (b + 1) * 32], &blocks[b]);
+            if (target_storage == .q8_0) {
+                const num_blocks = total_elements / 32;
+                const q_bytes = try allocator.alloc(u8, num_blocks * @sizeOf(quantization.BlockQ8_0));
+                quant_buf = q_bytes;
+                const blocks: [*]quantization.BlockQ8_0 = @ptrCast(@alignCast(q_bytes.ptr));
+
+                for (0..num_blocks) |b| {
+                    quantization.quantizeBlockQ8_0(aligned_f32[b * 32 .. (b + 1) * 32], &blocks[b]);
+                }
+
+                final_data = q_bytes;
+                final_storage = .q8_0;
+            } else if (target_storage == .q4_0) {
+                const num_blocks = total_elements / 32;
+                const q_bytes = try allocator.alloc(u8, num_blocks * @sizeOf(quantization.BlockQ4_0));
+                quant_buf = q_bytes;
+                const blocks: [*]quantization.BlockQ4_0 = @ptrCast(@alignCast(q_bytes.ptr));
+
+                for (0..num_blocks) |b| {
+                    quantization.quantizeBlockQ4_0(aligned_f32[b * 32 .. (b + 1) * 32], &blocks[b]);
+                }
+
+                final_data = q_bytes;
+                final_storage = .q4_0;
             }
-
-            final_data = q_bytes;
-            final_storage = .q8_0;
-        } else if (target_storage == .q4_0 and total_elements % 32 == 0 and final_storage == .f32) {
-            const num_blocks = total_elements / 32;
-            const q_bytes = try allocator.alloc(u8, num_blocks * @sizeOf(quantization.BlockQ4_0));
-            quant_buf = q_bytes;
-
-            const f32_slice: [*]const f32 = @ptrCast(@alignCast(final_data.ptr));
-            const blocks: [*]quantization.BlockQ4_0 = @ptrCast(@alignCast(q_bytes.ptr));
-
-            for (0..num_blocks) |b| {
-                quantization.quantizeBlockQ4_0(f32_slice[b * 32 .. (b + 1) * 32], &blocks[b]);
-            }
-
-            final_data = q_bytes;
-            final_storage = .q4_0;
         }
 
         try writer.addTensor(.{
