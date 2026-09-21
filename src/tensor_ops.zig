@@ -90,30 +90,41 @@ pub fn gemvF32(
     K: usize,
 ) void {
     const safe_M = @min(M, y.len);
-    if (bias) |b| {
-        for (0..safe_M) |r| {
-            const row_start = r * K;
-            if (row_start + K <= W.len) {
-                const b_val = if (r < b.len) b[r] else 0.0;
-                y[r] = dotProductF32(W[row_start .. row_start + K], x) + b_val;
-            } else if (row_start < W.len) {
-                const b_val = if (r < b.len) b[r] else 0.0;
-                y[r] = dotProductF32(W[row_start..], x[0 .. W.len - row_start]) + b_val;
-            } else {
-                y[r] = if (r < b.len) b[r] else 0.0;
-            }
+    var r: usize = 0;
+
+    // 4-row unrolled tile to maximize L1/L2 cache hit and vector register reuse
+    while (r + 4 <= safe_M and (r + 4) * K <= W.len and (r + 4) <= (if (bias) |b| b.len else safe_M)) : (r += 4) {
+        const row0 = W[(r + 0) * K .. (r + 1) * K];
+        const row1 = W[(r + 1) * K .. (r + 2) * K];
+        const row2 = W[(r + 2) * K .. (r + 3) * K];
+        const row3 = W[(r + 3) * K .. (r + 4) * K];
+
+        var sum0: f32 = dotProductF32(row0, x);
+        var sum1: f32 = dotProductF32(row1, x);
+        var sum2: f32 = dotProductF32(row2, x);
+        var sum3: f32 = dotProductF32(row3, x);
+
+        if (bias) |b| {
+            sum0 += b[r + 0];
+            sum1 += b[r + 1];
+            sum2 += b[r + 2];
+            sum3 += b[r + 3];
         }
-    } else {
-        var row_start: usize = 0;
-        for (0..safe_M) |r| {
-            if (row_start + K <= W.len) {
-                y[r] = dotProductF32(W[row_start .. row_start + K], x);
-            } else if (row_start < W.len) {
-                y[r] = dotProductF32(W[row_start..], x[0 .. W.len - row_start]);
-            } else {
-                y[r] = 0.0;
-            }
-            row_start += K;
+        y[r + 0] = sum0;
+        y[r + 1] = sum1;
+        y[r + 2] = sum2;
+        y[r + 3] = sum3;
+    }
+
+    while (r < safe_M) : (r += 1) {
+        const row_start = r * K;
+        const b_val = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
+        if (row_start + K <= W.len) {
+            y[r] = dotProductF32(W[row_start .. row_start + K], x) + b_val;
+        } else if (row_start < W.len) {
+            y[r] = dotProductF32(W[row_start..], x[0 .. W.len - row_start]) + b_val;
+        } else {
+            y[r] = b_val;
         }
     }
 }
@@ -133,9 +144,30 @@ pub fn gemmF32(
         const c_row = C[m * N .. (m + 1) * N];
         for (0..K) |k| {
             const a_val = A[m * K + k];
+            if (a_val == 0.0) continue;
+
             const b_row = B[k * N .. (k + 1) * N];
-            for (0..N) |n| {
-                c_row[n] += a_val * b_row[n];
+            if (a_val == 1.0) {
+                var n: usize = 0;
+                while (n + 8 <= N) : (n += 8) {
+                    const vb: @Vector(8, f32) = b_row[n..][0..8].*;
+                    const vc: @Vector(8, f32) = c_row[n..][0..8].*;
+                    c_row[n..][0..8].* = vc + vb;
+                }
+                while (n < N) : (n += 1) {
+                    c_row[n] += b_row[n];
+                }
+            } else {
+                const va: @Vector(8, f32) = @splat(a_val);
+                var n: usize = 0;
+                while (n + 8 <= N) : (n += 8) {
+                    const vb: @Vector(8, f32) = b_row[n..][0..8].*;
+                    const vc: @Vector(8, f32) = c_row[n..][0..8].*;
+                    c_row[n..][0..8].* = vc + (va * vb);
+                }
+                while (n < N) : (n += 1) {
+                    c_row[n] += a_val * b_row[n];
+                }
             }
         }
     }
@@ -454,18 +486,55 @@ pub fn layerNormF32(
     const len = @min(@min(x.len, weight.len), out.len);
     if (len == 0) return;
 
-    var sum: f32 = 0.0;
-    for (0..len) |i| sum += x[i];
+    var sum_vec: @Vector(8, f32) = @splat(0.0);
+    var i: usize = 0;
+    while (i + 8 <= len) : (i += 8) {
+        const vx: @Vector(8, f32) = x[i..][0..8].*;
+        sum_vec += vx;
+    }
+    var sum: f32 = @reduce(.Add, sum_vec);
+    while (i < len) : (i += 1) {
+        sum += x[i];
+    }
     const mean = sum / @as(f32, @floatFromInt(len));
+    const v_mean: @Vector(8, f32) = @splat(mean);
 
-    var var_sum: f32 = 0.0;
-    for (0..len) |i| {
+    var var_vec: @Vector(8, f32) = @splat(0.0);
+    i = 0;
+    while (i + 8 <= len) : (i += 8) {
+        const vx: @Vector(8, f32) = x[i..][0..8].*;
+        const diff = vx - v_mean;
+        var_vec += diff * diff;
+    }
+    var var_sum: f32 = @reduce(.Add, var_vec);
+    while (i < len) : (i += 1) {
         const diff = x[i] - mean;
         var_sum += diff * diff;
     }
     const inv_std = 1.0 / @sqrt((var_sum / @as(f32, @floatFromInt(len))) + eps);
+    const v_scale: @Vector(8, f32) = @splat(inv_std);
 
-    for (0..len) |i| {
+    i = 0;
+    while (i + 8 <= len) : (i += 8) {
+        const vx: @Vector(8, f32) = x[i..][0..8].*;
+        const vw: @Vector(8, f32) = weight[i..][0..8].*;
+        var v_out = (vx - v_mean) * v_scale * vw;
+        if (bias) |b| {
+            if (i + 8 <= b.len) {
+                const vb: @Vector(8, f32) = b[i..][0..8].*;
+                v_out += vb;
+            } else {
+                var p: [8]f32 = v_out;
+                for (0..8) |k| {
+                    if (i + k < b.len) p[k] += b[i + k];
+                }
+                v_out = p;
+            }
+        }
+        const p: [8]f32 = v_out;
+        out[i..][0..8].* = p;
+    }
+    while (i < len) : (i += 1) {
         var val = (x[i] - mean) * inv_std * weight[i];
         if (bias) |b| {
             if (i < b.len) val += b[i];
@@ -526,14 +595,22 @@ pub fn softmaxF32(logits: []const f32, out_probs: []f32) void {
 
     var sum: f32 = 0.0;
     for (0..len) |i| {
-        const e = @exp(logits[i] - max_val);
-        out_probs[i] = e;
-        sum += e;
+        const diff = logits[i] - max_val;
+        // e^(-20) is ~2e-9, below fp32 precision significance in probability distributions
+        if (diff < -20.0) {
+            out_probs[i] = 0.0;
+        } else {
+            const e = @exp(diff);
+            out_probs[i] = e;
+            sum += e;
+        }
     }
 
-    const inv_sum = 1.0 / sum;
-    for (0..len) |i| {
-        out_probs[i] *= inv_sum;
+    if (sum > 0.0) {
+        const inv_sum = 1.0 / sum;
+        for (0..len) |i| {
+            out_probs[i] *= inv_sum;
+        }
     }
 }
 
@@ -636,13 +713,43 @@ pub fn gemvQ8_0(
     const safe_M = @min(M, y.len);
     const blocks_per_row = K / 32;
     const row_bytes_len = blocks_per_row * 34;
-    for (0..safe_M) |r| {
-        const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
-        var row_sum = gemvQ8_0RowBytes(row_bytes, x, blocks_per_row);
+    var r: usize = 0;
+
+    // 4-row unrolled tile for memory bandwidth efficiency
+    while (r + 4 <= safe_M and (r + 4) * row_bytes_len <= W_bytes.len and (r + 4) <= (if (bias) |b| b.len else safe_M)) : (r += 4) {
+        const row0 = W_bytes[(r + 0) * row_bytes_len .. (r + 1) * row_bytes_len];
+        const row1 = W_bytes[(r + 1) * row_bytes_len .. (r + 2) * row_bytes_len];
+        const row2 = W_bytes[(r + 2) * row_bytes_len .. (r + 3) * row_bytes_len];
+        const row3 = W_bytes[(r + 3) * row_bytes_len .. (r + 4) * row_bytes_len];
+
+        var sum0 = gemvQ8_0RowBytes(row0, x, blocks_per_row);
+        var sum1 = gemvQ8_0RowBytes(row1, x, blocks_per_row);
+        var sum2 = gemvQ8_0RowBytes(row2, x, blocks_per_row);
+        var sum3 = gemvQ8_0RowBytes(row3, x, blocks_per_row);
+
         if (bias) |b| {
-            if (r < b.len) row_sum += b[r];
+            sum0 += b[r + 0];
+            sum1 += b[r + 1];
+            sum2 += b[r + 2];
+            sum3 += b[r + 3];
         }
-        y[r] = row_sum;
+        y[r + 0] = sum0;
+        y[r + 1] = sum1;
+        y[r + 2] = sum2;
+        y[r + 3] = sum3;
+    }
+
+    while (r < safe_M) : (r += 1) {
+        if ((r + 1) * row_bytes_len <= W_bytes.len) {
+            const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
+            var row_sum = gemvQ8_0RowBytes(row_bytes, x, blocks_per_row);
+            if (bias) |b| {
+                if (r < b.len) row_sum += b[r];
+            }
+            y[r] = row_sum;
+        } else {
+            y[r] = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
+        }
     }
 }
 
@@ -684,13 +791,43 @@ pub fn gemvQ4_0(
     const safe_M = @min(M, y.len);
     const blocks_per_row = K / 32;
     const row_bytes_len = blocks_per_row * 18;
-    for (0..safe_M) |r| {
-        const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
-        var row_sum = gemvQ4_0RowBytes(row_bytes, x, blocks_per_row);
+    var r: usize = 0;
+
+    // 4-row unrolled tile for memory bandwidth efficiency
+    while (r + 4 <= safe_M and (r + 4) * row_bytes_len <= W_bytes.len and (r + 4) <= (if (bias) |b| b.len else safe_M)) : (r += 4) {
+        const row0 = W_bytes[(r + 0) * row_bytes_len .. (r + 1) * row_bytes_len];
+        const row1 = W_bytes[(r + 1) * row_bytes_len .. (r + 2) * row_bytes_len];
+        const row2 = W_bytes[(r + 2) * row_bytes_len .. (r + 3) * row_bytes_len];
+        const row3 = W_bytes[(r + 3) * row_bytes_len .. (r + 4) * row_bytes_len];
+
+        var sum0 = gemvQ4_0RowBytes(row0, x, blocks_per_row);
+        var sum1 = gemvQ4_0RowBytes(row1, x, blocks_per_row);
+        var sum2 = gemvQ4_0RowBytes(row2, x, blocks_per_row);
+        var sum3 = gemvQ4_0RowBytes(row3, x, blocks_per_row);
+
         if (bias) |b| {
-            if (r < b.len) row_sum += b[r];
+            sum0 += b[r + 0];
+            sum1 += b[r + 1];
+            sum2 += b[r + 2];
+            sum3 += b[r + 3];
         }
-        y[r] = row_sum;
+        y[r + 0] = sum0;
+        y[r + 1] = sum1;
+        y[r + 2] = sum2;
+        y[r + 3] = sum3;
+    }
+
+    while (r < safe_M) : (r += 1) {
+        if ((r + 1) * row_bytes_len <= W_bytes.len) {
+            const row_bytes = W_bytes[r * row_bytes_len .. (r + 1) * row_bytes_len];
+            var row_sum = gemvQ4_0RowBytes(row_bytes, x, blocks_per_row);
+            if (bias) |b| {
+                if (r < b.len) row_sum += b[r];
+            }
+            y[r] = row_sum;
+        } else {
+            y[r] = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
+        }
     }
 }
 
@@ -1079,6 +1216,13 @@ pub fn gemvInt8Scaled(
     K: usize,
 ) void {
     const safe_M = @min(M, y.len);
+    if (scale_w == 0.0) {
+        for (0..safe_M) |r| {
+            y[r] = if (bias) |b| (if (r < b.len) b[r] else 0.0) else 0.0;
+        }
+        return;
+    }
+    const is_unit_scale = (scale_w == 1.0);
     for (0..safe_M) |r| {
         const row_start = r * K;
         const row_end = @min(row_start + K, W_i8.len);
@@ -1087,7 +1231,10 @@ pub fn gemvInt8Scaled(
             continue;
         }
         const row = W_i8[row_start..row_end];
-        var row_sum = dotProductInt8F32(row, x) * scale_w;
+        var row_sum = dotProductInt8F32(row, x);
+        if (!is_unit_scale) {
+            row_sum *= scale_w;
+        }
         if (bias) |b| {
             if (r < b.len) row_sum += b[r];
         }

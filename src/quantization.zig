@@ -254,25 +254,48 @@ pub fn dequantizeBF16(in_bytes: []const u8, count: usize, out: []f32) void {
     }
 }
 
-/// Dequantizes FP8 E4M3 to FP32 (sign: 1, exp: 4, mantissa: 3, bias: 7)
-pub fn dequantizeFP8_E4M3(in_bytes: []const u8, count: usize, out: []f32) void {
-    for (0..count) |i| {
-        const b = in_bytes[i];
+fn computeFP8_E4M3_LUT() [256]f32 {
+    @setEvalBranchQuota(10000);
+    var table: [256]f32 = undefined;
+    for (0..256) |idx| {
+        const b: u8 = @intCast(idx);
         const sign: f32 = if ((b & 0x80) != 0) -1.0 else 1.0;
         const exp = (b >> 3) & 0x0F;
         const mant = b & 0x07;
 
         if (exp == 0) {
             // Subnormal: (-1)^sign * 2^(-6) * (mant / 8)
-            out[i] = sign * std.math.pow(f32, 2.0, -6.0) * (@as(f32, @floatFromInt(mant)) / 8.0);
+            table[idx] = sign * std.math.pow(f32, 2.0, -6.0) * (@as(f32, @floatFromInt(mant)) / 8.0);
         } else if (exp == 15 and mant == 7) {
             // NaN in E4M3
-            out[i] = std.math.nan(f32);
+            table[idx] = std.math.nan(f32);
         } else {
             // Normalized: (-1)^sign * 2^(exp - 7) * (1 + mant / 8)
             const exponent_val = @as(f32, @floatFromInt(exp)) - 7.0;
-            out[i] = sign * std.math.pow(f32, 2.0, exponent_val) * (1.0 + @as(f32, @floatFromInt(mant)) / 8.0);
+            table[idx] = sign * std.math.pow(f32, 2.0, exponent_val) * (1.0 + @as(f32, @floatFromInt(mant)) / 8.0);
         }
+    }
+    return table;
+}
+
+pub const FP8_E4M3_TABLE: [256]f32 = computeFP8_E4M3_LUT();
+
+/// Dequantizes FP8 E4M3 to FP32 using comptime-generated lookup table (sign: 1, exp: 4, mantissa: 3, bias: 7)
+pub fn dequantizeFP8_E4M3(in_bytes: []const u8, count: usize, out: []f32) void {
+    const limit = @min(@min(in_bytes.len, count), out.len);
+    var i: usize = 0;
+    while (i + 8 <= limit) : (i += 8) {
+        out[i + 0] = FP8_E4M3_TABLE[in_bytes[i + 0]];
+        out[i + 1] = FP8_E4M3_TABLE[in_bytes[i + 1]];
+        out[i + 2] = FP8_E4M3_TABLE[in_bytes[i + 2]];
+        out[i + 3] = FP8_E4M3_TABLE[in_bytes[i + 3]];
+        out[i + 4] = FP8_E4M3_TABLE[in_bytes[i + 4]];
+        out[i + 5] = FP8_E4M3_TABLE[in_bytes[i + 5]];
+        out[i + 6] = FP8_E4M3_TABLE[in_bytes[i + 6]];
+        out[i + 7] = FP8_E4M3_TABLE[in_bytes[i + 7]];
+    }
+    while (i < limit) : (i += 1) {
+        out[i] = FP8_E4M3_TABLE[in_bytes[i]];
     }
 }
 
