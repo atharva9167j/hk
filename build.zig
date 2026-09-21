@@ -88,6 +88,24 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run HK library unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Benchmarks
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("tests/test_bench_compare.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "hk", .module = hk_mod },
+        },
+    });
+    const bench_exe = b.addExecutable(.{
+        .name = "hk-bench-compare",
+        .root_module = bench_mod,
+    });
+    b.installArtifact(bench_exe);
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run kernel optimization benchmarks");
+    bench_step.dependOn(&run_bench.step);
+
     if (cuda_enabled) {
         const gpu_bench_mod = b.createModule(.{
             .root_source_file = b.path("tools/hk_gpu_bench.zig"),

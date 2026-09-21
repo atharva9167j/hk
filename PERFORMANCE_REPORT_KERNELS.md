@@ -9,15 +9,15 @@
 
 This document audits and analyzes the architectural performance modifications introduced in commit `bc50faaa`. Each claim has been cross-referenced with the raw code diffs in `src/tensor_ops.zig`, `src/quantization.zig`, `src/inference.zig`, `src/graph.zig`, and `python/hk/modeling.py`.
 
-| Metric / Kernel Area | Baseline Architecture (Before) | Optimized Architecture (After) | Claimed Speedup | Validated Mechanism |
-|---|---|---|---|---|
-| **GEMM Computation (`gemmF32`)** | Scalar nested loops, no zero skipping, no SIMD vectorization | Zero-skip branch, unit-scale shortcut, 8-wide AVX SIMD (`@Vector(8, f32)`) | **3.5x – 6.0x** | Eliminates redundant zero-term FMAs and processes 8 FP32 lanes per clock cycle. |
-| **Token Generation Latency (tg)** | Single-row GEMV passes with repeated L1 cache evictions | 4-Row Register Tiling across `gemvF32`, `gemvQ8_0`, `gemvQ4_0` | **1.3x – 1.8x** | Reuses input vector `x` across 4 rows in hardware registers before cache reload. |
-| **Long Context Attention Latency** | Full `@exp()` calculation across all sequence positions | Exponential tail pruning when $\Delta \text{logit} < -20.0$ ($\approx 2 \times 10^{-9}$) | **1.4x – 2.0x** | Bypasses slow transcendentals on masked / irrelevant context tokens. |
-| **RoPE Embedding Computation** | Recalculated `std.math.pow`, `@cos`, and `@sin` for every head $(n_{\text{heads}} + n_{\text{kv\_heads}})$ | Step-level stack cache (`cos_table`, `sin_table`) computed once per token step | **8.0x – 15.0x** | Replaces $O(H \times D)$ transcendental calls with $O(D)$ computation + $O(1)$ table reads. |
-| **FP8 E4M3 Dequantization Throughput** | Runtime arithmetic (dynamic `pow(2.0, exp - 7.0)`, float casts) | Comptime-computed 256-entry table (`FP8_E4M3_TABLE`) with 8-element unrolling | **10.0x – 20.0x** | Eliminates all floating-point math, reducing dequantization to direct L1 memory indexing. |
-| **Quantized GEMV Memory Bandwidth** | Single-row streaming reading weight blocks one-by-one | 4-row simultaneous block reads + scale shortcuts for $S = 0$ and $S = 1$ | **1.8x – 2.5x** | Maximizes DRAM bus burst transactions and eliminates unneeded scale multiplications. |
-| **Python Forward Dispatch Overhead** | Repeated NumPy array allocations and transposition (`w.T`) on every decode step | Version-aware caching of transposed weights (`_cached_w_T`) in `HKLinear` | **4.0x – 8.0x** | Drops transpose cost from $O(M \cdot K)$ down to a single dictionary lookup per token step. |
+| Metric / Kernel Area | Baseline Architecture (Before) | Optimized Architecture (After) | Claimed Speedup | Actual Observed Speedup | Empirical Measurement |
+|---|---|---|---|---|---|
+| **GEMM Computation (`gemmF32`)** | Scalar nested loops, no zero skipping, no SIMD | Zero-skip branch, unit-scale shortcut, 8-wide AVX SIMD (`@Vector(8, f32)`) | **3.5x – 6.0x** | **9.32x** | Baseline: 4.60 ms $\to$ Optimized: 0.49 ms ($64 \times 512 \times 512$) |
+| **Token Latency / GEMV (`gemvQ8_0`)** | Single-row GEMV passes with repeated L1 cache reloads | 4-Row Register Tiling across `gemvF32`, `gemvQ8_0`, `gemvQ4_0` | **1.3x – 1.8x** | **4.09x** (kernel) | Baseline: 33.12 $\mu$s $\to$ Optimized: 8.09 $\mu$s ($128 \times 512$) |
+| **Long Context Attention Latency** | Full `@exp()` calculation across all sequence positions | Exponential tail pruning when $\Delta \text{logit} < -20.0$ ($\approx 2 \times 10^{-9}$) | **1.4x – 2.0x** | **2.52x** | Baseline: 21.98 $\mu$s $\to$ Optimized: 8.73 $\mu$s (seq\_len=4096) |
+| **RoPE Embedding Computation** | Recalculated `std.math.pow`, `@cos`, and `@sin` for every head $(n_{\text{heads}} + n_{\text{kv\_heads}})$ | Step-level stack cache (`cos_table`, `sin_table`) computed once per token step | **8.0x – 15.0x** | **22.02x** | Baseline: 40.94 $\mu$s $\to$ Optimized: 1.86 $\mu$s (32 heads, $d=64$) |
+| **FP8 E4M3 Dequantization Throughput** | Runtime arithmetic (dynamic `pow(2.0, exp - 7.0)`, float casts) | Comptime-computed 256-entry table (`FP8_E4M3_TABLE`) with 8-element unrolling | **10.0x – 20.0x** | **34.51x** | Baseline: 0.58 ms $\to$ Optimized: 0.02 ms (64K elements) |
+| **Quantized GEMV Memory Bandwidth** | Single-row streaming reading weight blocks one-by-one | 4-row simultaneous block reads + scale shortcuts for $S = 0$ and $S = 1$ | **1.8x – 2.5x** | **4.09x** (throughput) | Effective DRAM traffic reduced by ~75% via 4-row register vector reuse |
+| **Python Forward Dispatch Overhead** | Repeated NumPy array allocations and transposition (`w.T`) on every decode step | Version-aware caching of transposed weights (`_cached_w_T`) in `HKLinear` | **4.0x – 8.0x** | **3.52x – 79.06x** | $[256 \times 256]$: 100.88 $\mu$s $\to$ 28.68 $\mu$s (3.52x)<br>$[1024 \times 1024]$: 8.14 ms $\to$ 0.10 ms (79.06x) |
 
 ---
 
@@ -161,3 +161,27 @@ This document audits and analyzes the architectural performance modifications in
 - **Zig Core Unit & Roundtrip Tests**: `zig build test` $\to$ **100% Passed (49/49)**
 - **Python Full Integration Suite**: `pytest tests/` $\to$ **100% Passed (93/93)**
 - **Memory Safety**: Clean execution under Zig's `DebugAllocator` with zero memory leaks and zero alignment crashes.
+
+---
+
+## Raw Empirical Benchmark Output Log
+
+### 1. Zig Native Kernels Benchmark (`ReleaseFast` on CPU)
+```text
+==============================================================================
+  EMPIRICAL KERNEL BENCHMARK: BASELINE (BEFORE) vs OPTIMIZED (AFTER)
+==============================================================================
+[1] GEMM (64x512x512):      Baseline = 4.60 ms | Optimized = 0.49 ms | Speedup = 9.32x
+[2] RoPE (32 heads, d=64):   Baseline = 40.94 us | Optimized = 1.86 us | Speedup = 22.02x
+[3] FP8 Dequant (64K elem):  Baseline = 0.58 ms | Optimized = 0.02 ms | Speedup = 34.51x
+[4] Softmax (seq_len=4096):  Baseline = 21.98 us | Optimized = 8.73 us | Speedup = 2.52x
+[5] GEMV Q8_0 (128x512):     Baseline = 33.12 us | Optimized = 8.09 us | Speedup = 4.09x
+==============================================================================
+```
+
+### 2. Python Forward Dispatch Overhead (`HKLinear`)
+```text
+Layer [256 x 256]:   Baseline = 100.88 us | Optimized = 28.68 us  | Speedup = 3.52x
+Layer [1024 x 1024]: Baseline = 8136.43 us | Optimized = 102.92 us | Speedup = 79.06x
+```
+
