@@ -15,7 +15,7 @@ pub const TensorTOC = struct {
 
     pub fn deinit(self: *TensorTOC) void {
         for (self.entries.items) |e| {
-            self.allocator.free(e.name);
+            self.allocator.free(e.name.ptr[0 .. e.name.len + 1]);
         }
         self.entries.deinit(self.allocator);
     }
@@ -23,7 +23,7 @@ pub const TensorTOC = struct {
     pub fn add(self: *TensorTOC, entry: format.TensorEntry) !void {
         var e = entry;
         e.name = try self.allocator.dupeZ(u8, entry.name);
-        errdefer self.allocator.free(e.name);
+        errdefer self.allocator.free(e.name.ptr[0 .. e.name.len + 1]);
         try self.entries.append(self.allocator, e);
     }
 
