@@ -74,10 +74,11 @@ def untile_matrix_16x16(tiled: torch.Tensor, original_shape: Tuple[int, int]) ->
 def unpack_bitmask(packed_data: Union[bytes, memoryview], shape: Tuple[int, ...]) -> torch.Tensor:
     numel = int(np.prod(shape))
     mask_bytes = (numel + 7) // 8
+    val_offset = (mask_bytes + 3) & ~3
     mask = np.frombuffer(packed_data[:mask_bytes], dtype=np.uint8)
-    vals = np.frombuffer(packed_data[mask_bytes:], dtype=np.float16)
-    out = np.zeros(numel, dtype=np.float16)
-    bits = np.unpackbits(mask)[:numel]
+    vals = np.frombuffer(packed_data[val_offset:], dtype=np.float32)
+    out = np.zeros(numel, dtype=np.float32)
+    bits = np.unpackbits(mask, bitorder="little")[:numel]
     nonzero_idx = np.where(bits == 1)[0]
     out[nonzero_idx] = vals[:len(nonzero_idx)]
     return torch.from_numpy(out).view(shape)

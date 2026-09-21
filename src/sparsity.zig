@@ -90,8 +90,17 @@ pub fn decodeStructured2_4_F32(
     const val_bytes = payload[val_offset .. val_offset + expected_val_bytes];
 
     @memset(out, 0.0);
-    const val_ptr: [*]const f32 = @ptrCast(@alignCast(val_bytes.ptr));
+    const is_aligned = std.mem.isAligned(@intFromPtr(val_bytes.ptr), @alignOf(f32));
+    const val_ptr: ?[*]const f32 = if (is_aligned) @ptrCast(@alignCast(val_bytes.ptr)) else null;
     const full_pairs = num_groups / 2;
+
+    const readVal = struct {
+        inline fn get(p: ?[*]const f32, bytes: []const u8, idx: usize) f32 {
+            if (p) |ptr| return ptr[idx];
+            const u = std.mem.readInt(u32, bytes[idx * 4 .. (idx + 1) * 4][0..4], .little);
+            return @bitCast(u);
+        }
+    }.get;
 
     for (0..full_pairs) |byte_idx| {
         const meta_byte = meta[byte_idx];
@@ -106,13 +115,13 @@ pub fn decodeStructured2_4_F32(
 
         const idx0_0: usize = (nibble0 & 0x03);
         const idx0_1: usize = ((nibble0 >> 2) & 0x03);
-        out[base0 + idx0_0] = val_ptr[g0 * 2 + 0];
-        out[base0 + idx0_1] = val_ptr[g0 * 2 + 1];
+        out[base0 + idx0_0] = readVal(val_ptr, val_bytes, g0 * 2 + 0);
+        out[base0 + idx0_1] = readVal(val_ptr, val_bytes, g0 * 2 + 1);
 
         const idx1_0: usize = (nibble1 & 0x03);
         const idx1_1: usize = ((nibble1 >> 2) & 0x03);
-        out[base1 + idx1_0] = val_ptr[g1 * 2 + 0];
-        out[base1 + idx1_1] = val_ptr[g1 * 2 + 1];
+        out[base1 + idx1_0] = readVal(val_ptr, val_bytes, g1 * 2 + 0);
+        out[base1 + idx1_1] = readVal(val_ptr, val_bytes, g1 * 2 + 1);
     }
 
     if (num_groups % 2 != 0) {
@@ -122,8 +131,8 @@ pub fn decodeStructured2_4_F32(
         const idx0: usize = (nibble0 & 0x03);
         const idx1: usize = ((nibble0 >> 2) & 0x03);
         const base = g * 4;
-        out[base + idx0] = val_ptr[g * 2 + 0];
-        out[base + idx1] = val_ptr[g * 2 + 1];
+        out[base + idx0] = readVal(val_ptr, val_bytes, g * 2 + 0);
+        out[base + idx1] = readVal(val_ptr, val_bytes, g * 2 + 1);
     }
 }
 
@@ -165,6 +174,10 @@ pub fn encodeStructured2_4_F32(
                     break;
                 }
             }
+        }
+
+        if (found == 1) {
+            idx1 = if (idx0 == 0) 1 else 0;
         }
 
         const bits0: u32 = @bitCast(block[idx0]);

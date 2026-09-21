@@ -110,8 +110,10 @@ class HKLinear(nn.Module):
 
             # Dispatch to native SIMD Zig GEMM
             # (x @ W.T) = (x[M, K] * W.T[K, N]) where K = in_features, N = out_features
-            W_T = np.ascontiguousarray(w_np.T)
-            out_np = native_gemm(x_flat, W_T)
+            if not hasattr(self, "_cached_w_T") or self._cached_w_T is None or getattr(self, "_cached_w_version", -1) != getattr(self.weight, "_version", 0):
+                self._cached_w_T = np.ascontiguousarray(w_np.T)
+                self._cached_w_version = getattr(self.weight, "_version", 0)
+            out_np = native_gemm(x_flat, self._cached_w_T)
             if b_np is not None:
                 out_np += b_np
             out_tensor = torch.from_numpy(out_np).view(*x_shape[:-1], self.out_features)

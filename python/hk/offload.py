@@ -97,8 +97,9 @@ class HardwareMemoryInspector:
                 total_b = 32 * 1024 * 1024 * 1024
                 free_b = 16 * 1024 * 1024 * 1024
 
-            # For CPU, leave at least 2 GB for OS/runtime
-            usable_b = max(0, free_b - 2 * 1024 * 1024 * 1024)
+            # For CPU, leave headroom for OS/runtime (up to 2 GB, or 75% of available if constrained)
+            reserved_b = min(2 * 1024 * 1024 * 1024, int(free_b * 0.25))
+            usable_b = max(1024 * 1024, free_b - reserved_b)
 
             return DeviceMemoryInfo(
                 device="cpu",

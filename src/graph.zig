@@ -580,11 +580,29 @@ pub const ExecutionPlan = struct {
                     const k_slice = self.arena.hostSlice(k_slot);
                     const head_dim = node.head_dim;
                     const half_dim = head_dim / 2;
+                    var cos_table: [256]f32 = undefined;
+                    var sin_table: [256]f32 = undefined;
+                    const table_len = @min(half_dim, 256);
+
+                    for (0..table_len) |i| {
+                        const freq = 1.0 / std.math.pow(f32, node.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
+                        const val = @as(f32, @floatFromInt(ctx.pos)) * freq;
+                        cos_table[i] = @cos(val);
+                        sin_table[i] = @sin(val);
+                    }
 
                     for (0..node.n_heads) |h| {
                         if ((h + 1) * head_dim > q_slice.len) break;
                         const q_head = q_slice[h * head_dim .. (h + 1) * head_dim];
-                        for (0..half_dim) |i| {
+                        for (0..table_len) |i| {
+                            const cos_val = cos_table[i];
+                            const sin_val = sin_table[i];
+                            const v0 = q_head[2 * i];
+                            const v1 = q_head[2 * i + 1];
+                            q_head[2 * i] = v0 * cos_val - v1 * sin_val;
+                            q_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
+                        }
+                        for (table_len..half_dim) |i| {
                             const freq = 1.0 / std.math.pow(f32, node.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
                             const val = @as(f32, @floatFromInt(ctx.pos)) * freq;
                             const cos_val = @cos(val);
@@ -599,7 +617,15 @@ pub const ExecutionPlan = struct {
                     for (0..node.n_kv_heads) |h| {
                         if ((h + 1) * head_dim > k_slice.len) break;
                         const k_head = k_slice[h * head_dim .. (h + 1) * head_dim];
-                        for (0..half_dim) |i| {
+                        for (0..table_len) |i| {
+                            const cos_val = cos_table[i];
+                            const sin_val = sin_table[i];
+                            const v0 = k_head[2 * i];
+                            const v1 = k_head[2 * i + 1];
+                            k_head[2 * i] = v0 * cos_val - v1 * sin_val;
+                            k_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
+                        }
+                        for (table_len..half_dim) |i| {
                             const freq = 1.0 / std.math.pow(f32, node.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
                             const val = @as(f32, @floatFromInt(ctx.pos)) * freq;
                             const cos_val = @cos(val);
@@ -669,7 +695,14 @@ pub const ExecutionPlan = struct {
                     const max_t = @min(ctx.pos + 1, ctx.max_seq_len);
 
                     var att_stack: [2048]f32 = undefined;
-                    const att = if (ctx.att.len >= max_t) ctx.att[0..max_t] else att_stack[0..@min(max_t, 2048)];
+                    const heap_att = if (ctx.att.len < max_t and max_t > 2048) try self.allocator.alloc(f32, max_t) else null;
+                    defer if (heap_att) |ha| self.allocator.free(ha);
+                    const att = if (ctx.att.len >= max_t)
+                        ctx.att[0..max_t]
+                    else if (heap_att) |ha|
+                        ha
+                    else
+                        att_stack[0..max_t];
 
                     for (0..n_heads) |h| {
                         if ((h + 1) * head_dim > q_slice.len or (h + 1) * head_dim > out_slice.len) break;
@@ -780,10 +813,29 @@ pub const ExecutionPlan = struct {
                     }
 
                     const half_dim = head_dim / 2;
+                    var cos_table: [256]f32 = undefined;
+                    var sin_table: [256]f32 = undefined;
+                    const table_len = @min(half_dim, 256);
+
+                    for (0..table_len) |i| {
+                        const freq = 1.0 / std.math.pow(f32, node.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
+                        const val = @as(f32, @floatFromInt(ctx.pos)) * freq;
+                        cos_table[i] = @cos(val);
+                        sin_table[i] = @sin(val);
+                    }
+
                     for (0..node.n_heads) |h| {
                         if ((h + 1) * head_dim > q_slice.len) break;
                         const q_head = q_slice[h * head_dim .. (h + 1) * head_dim];
-                        for (0..half_dim) |i| {
+                        for (0..table_len) |i| {
+                            const cos_val = cos_table[i];
+                            const sin_val = sin_table[i];
+                            const v0 = q_head[2 * i];
+                            const v1 = q_head[2 * i + 1];
+                            q_head[2 * i] = v0 * cos_val - v1 * sin_val;
+                            q_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
+                        }
+                        for (table_len..half_dim) |i| {
                             const freq = 1.0 / std.math.pow(f32, node.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
                             const val = @as(f32, @floatFromInt(ctx.pos)) * freq;
                             const cos_val = @cos(val);
@@ -798,7 +850,15 @@ pub const ExecutionPlan = struct {
                     for (0..node.n_kv_heads) |h| {
                         if ((h + 1) * head_dim > k_slice.len) break;
                         const k_head = k_slice[h * head_dim .. (h + 1) * head_dim];
-                        for (0..half_dim) |i| {
+                        for (0..table_len) |i| {
+                            const cos_val = cos_table[i];
+                            const sin_val = sin_table[i];
+                            const v0 = k_head[2 * i];
+                            const v1 = k_head[2 * i + 1];
+                            k_head[2 * i] = v0 * cos_val - v1 * sin_val;
+                            k_head[2 * i + 1] = v0 * sin_val + v1 * cos_val;
+                        }
+                        for (table_len..half_dim) |i| {
                             const freq = 1.0 / std.math.pow(f32, node.rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(head_dim)));
                             const val = @as(f32, @floatFromInt(ctx.pos)) * freq;
                             const cos_val = @cos(val);
@@ -900,10 +960,7 @@ pub fn matVec(weight: WeightRef, in_x: []const f32, out_y: []f32) void {
             }
         },
         else => {
-            if (std.mem.isAligned(@intFromPtr(weight.data.ptr), @alignOf(f32))) {
-                const w_f32: [*]const f32 = @ptrCast(@alignCast(weight.data.ptr));
-                tensor_ops.gemvF32(w_f32[0 .. weight.rows * weight.cols], in_x, null, out_y[0..safe_rows], safe_rows, weight.cols);
-            }
+            @memset(out_y[0..safe_rows], 0.0);
         },
     }
 }
