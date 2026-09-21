@@ -255,7 +255,7 @@ pub fn dequantizeBF16(in_bytes: []const u8, count: usize, out: []f32) void {
 }
 
 fn computeFP8_E4M3_LUT() [256]f32 {
-    @setEvalBranchQuota(10000);
+    @setEvalBranchQuota(100000);
     var table: [256]f32 = undefined;
     for (0..256) |idx| {
         const b: u8 = @intCast(idx);
@@ -265,14 +265,19 @@ fn computeFP8_E4M3_LUT() [256]f32 {
 
         if (exp == 0) {
             // Subnormal: (-1)^sign * 2^(-6) * (mant / 8)
-            table[idx] = sign * std.math.pow(f32, 2.0, -6.0) * (@as(f32, @floatFromInt(mant)) / 8.0);
+            // 2^(-6) = 0.015625
+            table[idx] = sign * 0.015625 * (@as(f32, @floatFromInt(mant)) / 8.0);
         } else if (exp == 15 and mant == 7) {
             // NaN in E4M3
             table[idx] = std.math.nan(f32);
         } else {
             // Normalized: (-1)^sign * 2^(exp - 7) * (1 + mant / 8)
-            const exponent_val = @as(f32, @floatFromInt(exp)) - 7.0;
-            table[idx] = sign * std.math.pow(f32, 2.0, exponent_val) * (1.0 + @as(f32, @floatFromInt(mant)) / 8.0);
+            const exp_i: i32 = @as(i32, @intCast(exp)) - 7;
+            const factor: f32 = if (exp_i >= 0)
+                @floatFromInt(@as(u32, 1) << @intCast(exp_i))
+            else
+                1.0 / @as(f32, @floatFromInt(@as(u32, 1) << @intCast(-exp_i)));
+            table[idx] = sign * factor * (1.0 + @as(f32, @floatFromInt(mant)) / 8.0);
         }
     }
     return table;
