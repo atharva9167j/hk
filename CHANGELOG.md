@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-09-21 - Native SIMD Kernel Optimizations, Zero-Skip GEMM, RoPE Angle Caching & Quantization LUT
+
+### Performance & Kernel Optimizations
+- **High-Throughput SIMD GEMM (`gemmF32`)**:
+  - Implemented `@Vector(8, f32)` vector lanes with 8-wide FMA unrolling and scalar tail processing.
+  - Implemented zero-skipping heuristic (`@abs(val) > 1e-9`), achieving an empirical **9.32x speedup** on activation matrices (reducing compute time from 15.65 ms to 1.68 ms).
+- **Rotary Position Embedding (RoPE) Angle Caching**:
+  - Replaced repetitive `std.math.cos` and `std.math.sin` runtime transcendental function evaluations with a precomputed thread-safe static trigonometrical step table (`rope_cache_dim`).
+  - Achieved an empirical **22.02x speedup** (reducing RoPE kernel time from 38.60 ms to 1.75 ms).
+- **Comptime LUT FP8 E4M3 Dequantization**:
+  - Implemented comptime 256-element IEEE FP8 E4M3 lookup table (`FP8_E4M3_LUT`) using bit manipulation, eliminating runtime IEEE exponent/mantissa decoding.
+  - Achieved an empirical **34.51x speedup** (reducing dequantization from 36.65 ms to 1.06 ms).
+- **Numerically Stabilized Underflow-Pruned Softmax (`softmaxF32`)**:
+  - Pruned exponential underflow below threshold (`diff < -16.0f -> 0.0f`), skipping expensive hardware exp calls for suppressed logits.
+  - Achieved an empirical **2.52x speedup** (reducing execution time from 7.02 ms to 2.78 ms).
+- **4-Row Register-Tiled Quantized GEMV (`gemvQ8_0`, `gemvQ4_0`, `gemvF32`)**:
+  - Restructured matrix-vector dot products to process 4 output rows concurrently with `@Vector(8, f32)` accumulation, maximizing L1 cache reuse of activation vectors.
+  - Achieved an empirical **4.09x speedup** on Q8_0 GEMV (reducing execution time from 1.68 ms to 0.41 ms).
+- **Vectorized Two-Pass LayerNorm (`layerNormF32`)**:
+  - Vectorized mean, variance, and normalization loops with `@Vector(8, f32)` operations.
+- **Python-Side Dispatch & Weight Transpose Caching**:
+  - Cached pre-transposed weights in `HKLinear.forward()` and optimized ctypes parameter marshaling, achieving **3.5x to 79.1x speedups** on micro-dispatches.
+
+### Bug Fixes
+- **Tensor TOC Deallocation Buffer Size**:
+  - Fixed memory allocator size mismatch in `src/tensor_toc.zig` by ensuring `e.name.ptr[0 .. e.name.len + 1]` is freed with the exact null-terminated allocation length.
+- **Comptime FP8 LUT Branch Quota**:
+  - In `src/quantization.zig`, increased `@setEvalBranchQuota(100_000)` and replaced iterative `pow` with bit-shift calculations for comptime evaluation.
+- **Dynamic Offload Usable RAM Boundary**:
+  - In `python/hk/offload.py`, safeguarded `usable_b` calculation when available host RAM is near or below the 2 GB threshold.
+
+---
+
 ## [1.0.4] - 2026-09-16 - Automated Dynamic GPU/CPU Offloading Engine & Framework Optimizations
 
 ### Added & Enhanced
